@@ -1,30 +1,12 @@
 import 'package:flutter/material.dart';
-import '../health_import.dart';
-import '../charts.dart';
+import '../chart_view.dart';
 import '../db.dart';
+import '../health_import.dart';
+import '../metrics.dart';
 import '../nutrients.dart';
-import 'activity_view.dart';
 import '../widgets.dart';
-
-DateTime _utc(String day) => DateTime.parse('${day}T00:00:00Z');
-
-/// Average of all entries in the 7 days up to and including each entry.
-List<double> movingAverage(List<WeightPoint> pts) {
-  final out = <double>[];
-  for (var i = 0; i < pts.length; i++) {
-    final di = _utc(pts[i].day);
-    var sum = 0.0;
-    var n = 0;
-    for (var j = 0; j <= i; j++) {
-      if (di.difference(_utc(pts[j].day)).inDays <= 6) {
-        sum += pts[j].kg;
-        n++;
-      }
-    }
-    out.add(sum / n);
-  }
-  return out;
-}
+import 'activity_view.dart';
+import 'training_view.dart';
 
 class ProgressScreen extends StatefulWidget {
   const ProgressScreen({super.key});
@@ -34,16 +16,92 @@ class ProgressScreen extends StatefulWidget {
 }
 
 class _ProgressScreenState extends State<ProgressScreen> {
-  int _range = 30; // days shown
-  String _nutrient = 'calories';
-  DateTime _today = DateTime.now();
-  Map<String, DayTotals> _totals = {};
-  List<WeightPoint> _weights = []; // includes 6 extra days for the average
-  Map<String, double> _targets = {};
+  int _v = 0; // bumped when data changed, so the charts reload
+  // chart settings are kept here, so they survive switching tabs
+  ChartConfig? _intakeCfg, _weightCfg, _activityCfg;
 
+  void _bump() => setState(() => _v++);
+
+  @override
+  Widget build(BuildContext context) {
+    return DefaultTabController(
+      length: 4,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Progress'),
+          bottom: const TabBar(isScrollable: true, tabs: [
+            Tab(text: 'Intake'),
+            Tab(text: 'Weight'),
+            Tab(text: 'Activity'),
+            Tab(text: 'Training'),
+          ]),
+        ),
+        body: TabBarView(
+          children: [
+            ListView(
+              padding: const EdgeInsets.all(12),
+              children: [
+                MetricChart(
+                  metrics: nutritionMetrics,
+                  initialMetric: 'nut:calories',
+                  reloadToken: _v,
+                  config: _intakeCfg,
+                  onConfigChanged: (c) => _intakeCfg = c,
+                ),
+              ],
+            ),
+            ListView(
+              padding: const EdgeInsets.all(12),
+              children: [
+                MetricChart(
+                  metrics: weightMetrics,
+                  initialMetric: 'weight',
+                  initialDays: 90,
+                  reloadToken: _v,
+                  config: _weightCfg,
+                  onConfigChanged: (c) => _weightCfg = c,
+                ),
+                WeightPanel(onChanged: _bump),
+              ],
+            ),
+            ListView(
+              padding: const EdgeInsets.all(12),
+              children: [
+                MetricChart(
+                  metrics: activityMetrics,
+                  initialMetric: 'act:steps',
+                  reloadToken: _v,
+                  config: _activityCfg,
+                  onConfigChanged: (c) => _activityCfg = c,
+                ),
+                ActivityPanel(onChanged: _bump),
+              ],
+            ),
+            ListView(
+              padding: const EdgeInsets.all(12),
+              children: [TrainingView(reloadToken: _v)],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Typing in a weight, importing from Health Connect, recent entries.
+class WeightPanel extends StatefulWidget {
+  final VoidCallback onChanged;
+  const WeightPanel({super.key, required this.onChanged});
+
+  @override
+  State<WeightPanel> createState() => _WeightPanelState();
+}
+
+class _WeightPanelState extends State<WeightPanel> {
   final _kg = TextEditingController();
+  DateTime _day = DateTime.now();
   bool _importing = false;
-  DateTime _weightDay = DateTime.now();
+  List<WeightPoint> _recent = []; // oldest first
 
   @override
   void initState() {
@@ -57,56 +115,39 @@ class _ProgressScreenState extends State<ProgressScreen> {
     super.dispose();
   }
 
-  DateTime get _firstDay =>
-      DateTime(_today.year, _today.month, _today.day - (_range - 1));
-
   void _load() {
     final now = DateTime.now();
-    final first = DateTime(now.year, now.month, now.day - (_range - 1));
-    final firstForAverage = DateTime(first.year, first.month, first.day - 6);
-    setState(() {
-      _today = now;
-      _totals = AppDb.instance.dailyTotals(dayKey(first), dayKey(now));
-      _weights = AppDb.instance.loadWeights(dayKey(firstForAverage));
-      _targets = AppDb.instance.loadTargets();
-    });
+    final from = DateTime(now.year, now.month, now.day - 60);
+    setState(() => _recent = AppDb.instance.loadWeights(dayKey(from)));
   }
 
-  void _saveWeight() {
+  void _save() {
     final kg = parseNum(_kg.text);
     if (kg == null || kg < 20 || kg > 500) {
       ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Enter a weight in kg (20 to 500).')));
       return;
     }
-    AppDb.instance.saveWeight(dayKey(_weightDay), kg);
+    AppDb.instance.saveWeight(dayKey(_day), kg);
     _kg.clear();
     _load();
+    widget.onChanged();
   }
 
-  Future<void> _importHealth() async {
-    setState(() => _importing = true);
-    final r = await HealthImport.importAll();
-    if (!mounted) return;
-    setState(() => _importing = false);
-    _load();
-    ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(r.summary), duration: const Duration(seconds: 6)));
-  }
-
-  Future<void> _pickWeightDay() async {
+  Future<void> _pickDay() async {
     final d = await showDatePicker(
       context: context,
-      initialDate: _weightDay,
-      firstDate: DateTime(2020),
+      initialDate: _day,
+      firstDate: DateTime(2015),
       lastDate: DateTime(2100),
     );
-    if (d != null) setState(() => _weightDay = d);
+    if (d != null) setState(() => _day = d);
   }
 
-  void _deleteWeight(WeightPoint p) {
+  void _delete(WeightPoint p) {
     AppDb.instance.deleteWeight(p.day);
     _load();
+    widget.onChanged();
     final m = ScaffoldMessenger.of(context);
     m.hideCurrentSnackBar();
     m.showSnackBar(SnackBar(
@@ -118,123 +159,44 @@ class _ProgressScreenState extends State<ProgressScreen> {
         onPressed: () {
           AppDb.instance.saveWeight(p.day, p.kg);
           _load();
+          widget.onChanged();
         },
       ),
     ));
   }
 
-  Widget _rangeSelector() {
-    return SegmentedButton<int>(
-      segments: const [
-        ButtonSegment(value: 7, label: Text('7 d')),
-        ButtonSegment(value: 30, label: Text('30 d')),
-        ButtonSegment(value: 90, label: Text('90 d')),
-        ButtonSegment(value: 365, label: Text('1 y')),
-      ],
-      selected: {_range},
-      onSelectionChanged: (s) {
-        _range = s.first;
-        _load();
-      },
-    );
+  Future<void> _importHealth() async {
+    setState(() => _importing = true);
+    final r = await HealthImport.importAll();
+    if (!mounted) return;
+    setState(() => _importing = false);
+    _load();
+    widget.onChanged();
+    ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(r.summary), duration: const Duration(seconds: 6)));
   }
 
-  Widget _nutritionCard() {
+  @override
+  Widget build(BuildContext context) {
     final title = Theme.of(context).textTheme.titleMedium;
-    final n = nutrients.firstWhere((x) => x.key == _nutrient);
-    final days = [
-      for (var i = 0; i < _range; i++)
-        DateTime(_firstDay.year, _firstDay.month, _firstDay.day + i)
-    ];
-    final values = <double?>[
-      for (final d in days) _totals[dayKey(d)]?.totals[_nutrient]
-    ];
-    final partial = <bool>[
-      for (final d in days)
-        _totals[dayKey(d)]?.incomplete.contains(_nutrient) ?? false
-    ];
-    final known = values.whereType<double>().toList();
-    final avg =
-        known.isEmpty ? null : known.reduce((a, b) => a + b) / known.length;
-    final target = _targets[_nutrient];
-    final anyPartial = partial.any((p) => p);
-
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Wrap(
-              crossAxisAlignment: WrapCrossAlignment.center,
-              spacing: 16,
-              children: [
-                Text('Intake per day', style: title),
-                DropdownButton<String>(
-                  value: _nutrient,
-                  items: [
-                    for (final x in nutrients)
-                      DropdownMenuItem(
-                          value: x.key, child: Text('${x.name} (${x.unit})')),
-                  ],
-                  onChanged: (v) => setState(() => _nutrient = v!),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            DailyBarChart(
-                days: days, values: values, partial: partial, target: target),
-            const SizedBox(height: 8),
-            Text(avg == null
-                ? 'No data for ${n.name} in this period.'
-                : 'Average on the ${known.length} logged day(s): ${fmt(avg)} ${n.unit}'
-                    '${target != null ? '   (target ${fmt(target)} ${n.unit}, red dashed line)' : ''}'),
-            if (anyPartial)
-              const Text(
-                  'Lighter bars: some foods that day have no value for this nutrient, so the bar is too low.',
-                  style: TextStyle(fontSize: 12)),
-            const Text('Days with no logged food, or no data for this nutrient, have no bar.',
-                style: TextStyle(fontSize: 12)),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _weightCard() {
-    final title = Theme.of(context).textTheme.titleMedium;
-    final fromKey = dayKey(_firstDay);
-    final avgAll = movingAverage(_weights);
-    // only what falls inside the visible range is drawn
-    final idx = [
-      for (var i = 0; i < _weights.length; i++)
-        if (_weights[i].day.compareTo(fromKey) >= 0) i
-    ];
-    final shown = [for (final i in idx) _weights[i]];
-    final shownAvg = [for (final i in idx) avgAll[i]];
-
-    String stats;
-    if (shown.isEmpty) {
-      stats = 'No weight entries in this period.';
-    } else {
-      final latest = shown.last.kg;
-      final avgNow = shownAvg.last;
-      stats = 'Latest: ${latest.toStringAsFixed(1)} kg   '
-          '7-day average: ${avgNow.toStringAsFixed(1)} kg';
-      if (shown.length > 1) {
-        final change = avgNow - shownAvg.first;
-        stats += '   Change over the period (7-day average): '
-            '${change >= 0 ? '+' : ''}${change.toStringAsFixed(1)} kg';
+    String stats = 'No weight entries in the last 60 days.';
+    if (_recent.isNotEmpty) {
+      final now = DateTime.now();
+      final cut = dayKey(DateTime(now.year, now.month, now.day - 6));
+      final week = _recent.where((p) => p.day.compareTo(cut) >= 0).toList();
+      stats = 'Latest: ${_recent.last.kg.toStringAsFixed(1)} kg (${_recent.last.day})';
+      if (week.isNotEmpty) {
+        final avg = week.fold<double>(0, (s, p) => s + p.kg) / week.length;
+        stats += '   Average of the last 7 days: ${avg.toStringAsFixed(1)} kg';
       }
     }
-
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Weight', style: title),
+            Text('Add weight', style: title),
             Row(
               children: [
                 Expanded(
@@ -242,15 +204,13 @@ class _ProgressScreenState extends State<ProgressScreen> {
                     controller: _kg,
                     label: 'Weight',
                     suffix: 'kg',
-                    onSubmitted: (_) => _saveWeight(),
+                    onSubmitted: (_) => _save(),
                   ),
                 ),
                 const SizedBox(width: 8),
-                TextButton(
-                    onPressed: _pickWeightDay,
-                    child: Text(dayKey(_weightDay))),
+                TextButton(onPressed: _pickDay, child: Text(dayKey(_day))),
                 const SizedBox(width: 4),
-                FilledButton(onPressed: _saveWeight, child: const Text('Save')),
+                FilledButton(onPressed: _save, child: const Text('Save')),
               ],
             ),
             if (HealthImport.supported)
@@ -259,26 +219,13 @@ class _ProgressScreenState extends State<ProgressScreen> {
                 child: OutlinedButton.icon(
                   onPressed: _importing ? null : _importHealth,
                   icon: const Icon(Icons.health_and_safety_outlined),
-                  label: Text(_importing
-                      ? 'Importing...'
-                      : 'Import from Health Connect'),
+                  label: Text(_importing ? 'Importing...' : 'Import from Health Connect'),
                 ),
               ),
             const SizedBox(height: 8),
-            WeightChart(
-              days: [for (final p in shown) p.day],
-              kgs: [for (final p in shown) p.kg],
-              average: shownAvg,
-              startDay: fromKey,
-              endDay: dayKey(_today),
-            ),
-            const SizedBox(height: 4),
-            const Text('Dots: your entries. Line: 7-day average.',
-                style: TextStyle(fontSize: 12)),
-            const SizedBox(height: 8),
             Text(stats),
             const SizedBox(height: 8),
-            for (final p in shown.reversed.take(8))
+            for (final p in _recent.reversed.take(8))
               ListTile(
                 dense: true,
                 contentPadding: EdgeInsets.zero,
@@ -290,49 +237,11 @@ class _ProgressScreenState extends State<ProgressScreen> {
                     IconButton(
                       icon: const Icon(Icons.delete_outline),
                       tooltip: 'Delete',
-                      onPressed: () => _deleteWeight(p),
+                      onPressed: () => _delete(p),
                     ),
                   ],
                 ),
               ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return DefaultTabController(
-      length: 3,
-      child: Scaffold(
-        appBar: AppBar(
-          title: const Text('Progress'),
-          bottom: const TabBar(tabs: [
-            Tab(text: 'Intake'),
-            Tab(text: 'Weight'),
-            Tab(text: 'Activity'),
-          ]),
-        ),
-        body: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
-              child: _rangeSelector(),
-            ),
-            Expanded(
-              child: TabBarView(
-                children: [
-                  ListView(
-                      padding: const EdgeInsets.all(12),
-                      children: [_nutritionCard()]),
-                  ListView(
-                      padding: const EdgeInsets.all(12),
-                      children: [_weightCard()]),
-                  ActivityView(range: _range),
-                ],
-              ),
-            ),
           ],
         ),
       ),

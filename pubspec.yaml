@@ -40,6 +40,8 @@ dependencies:
   path: ^1.9.1
   http: ^1.6.0
   health: ^13.3.2
+  file_picker: ^13.3.3
+  mobile_scanner: ^7.5.0
 
 dev_dependencies:
   flutter_test:

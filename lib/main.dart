@@ -7,6 +7,7 @@ import 'screens/recipes_screen.dart';
 import 'screens/targets_screen.dart';
 import 'screens/today_screen.dart';
 import 'health_import.dart';
+import 'hevy_api.dart';
 import 'sync_service.dart';
 
 Future<void> main() async {
@@ -63,7 +64,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   Future<void> _autoSync() async {
     // Health Connect first, so new weights are included in the sync.
     final imported = await HealthImport.autoImport();
-    if (imported > 0) _onSyncedData();
+    final hevy = await HevySync.auto();
+    if (imported > 0 || hevy > 0) _onSyncedData();
     if (SyncService.configured) await SyncService.run();
   }
 

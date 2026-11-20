@@ -150,7 +150,8 @@ class SyncStore {
     // workouts
     for (final r in _db.select(
         'SELECT w.id, w.day, w.start_ms, w.end_ms, w.type, w.title, '
-        'w.distance_m, w.active_kcal, w.source, w.updated_at, w.deleted '
+        'w.distance_m, w.active_kcal, w.source, w.notes, w.extra, w.hr_json, w.ex_json, '
+        'w.updated_at, w.deleted '
         'FROM workouts w '
         "LEFT JOIN sync_meta m ON m.tbl = 'workouts' AND m.id = w.id "
         'WHERE m.pushed_at IS NULL OR w.updated_at > m.pushed_at')) {
@@ -164,6 +165,8 @@ class SyncStore {
         'distance_m': r['distance_m'],
         'active_kcal': r['active_kcal'],
         'source': r['source'],
+        'notes': r['notes'],
+        'extra': _fullExtra(r),
       }));
     }
 
@@ -182,6 +185,17 @@ class SyncStore {
       }
     }
     return out;
+  }
+
+  /// metrics + heart rate + exercises as one map (the format of the sync records)
+  static Map<String, dynamic> _fullExtra(Row r) {
+    final m = Map<String, dynamic>.from(
+        jsonDecode((r['extra'] as String?) ?? '{}') as Map);
+    final hr = (r['hr_json'] as String?) ?? '';
+    final ex = (r['ex_json'] as String?) ?? '';
+    if (hr.isNotEmpty) m['hr'] = jsonDecode(hr);
+    if (ex.isNotEmpty) m['ex'] = jsonDecode(ex);
+    return m;
   }
 
   static void _setMeta(String tbl, String id, int at) {
@@ -224,6 +238,7 @@ class SyncStore {
       _db.execute('ROLLBACK');
       rethrow;
     }
+    AppDb.instance.invalidateWorkouts();
     return applied;
   }
 
@@ -328,19 +343,27 @@ class SyncStore {
           [r.id, jsonEncode(d['metrics'] ?? {}),
             d['source'] ?? 'health_connect', r.updatedAt]);
     } else if (r.tbl == 'workouts') {
+      final extra = Map<String, dynamic>.from((d['extra'] as Map?) ?? {});
+      final hr = extra.remove('hr');
+      final ex = extra.remove('ex');
       _db.execute(
           'INSERT INTO workouts(id, day, start_ms, end_ms, type, title, '
-          'distance_m, active_kcal, source, updated_at, deleted) '
-          'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
+          'distance_m, active_kcal, source, notes, extra, hr_json, ex_json, '
+          'updated_at, deleted) '
+          'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
           'ON CONFLICT(id) DO UPDATE SET day = excluded.day, '
           'start_ms = excluded.start_ms, end_ms = excluded.end_ms, '
           'type = excluded.type, title = excluded.title, '
           'distance_m = excluded.distance_m, active_kcal = excluded.active_kcal, '
-          'source = excluded.source, updated_at = excluded.updated_at, '
-          'deleted = excluded.deleted',
+          'source = excluded.source, notes = excluded.notes, '
+          'extra = excluded.extra, hr_json = excluded.hr_json, '
+          'ex_json = excluded.ex_json, '
+          'updated_at = excluded.updated_at, deleted = excluded.deleted',
           [r.id, d['day'], d['start_ms'], d['end_ms'], d['type'],
             d['title'] ?? '', d['distance_m'], d['active_kcal'],
-            d['source'] ?? 'manual', r.updatedAt, del]);
+            d['source'] ?? 'manual', d['notes'] ?? '', jsonEncode(extra),
+            hr == null ? '' : jsonEncode(hr), ex == null ? '' : jsonEncode(ex),
+            r.updatedAt, del]);
     } else if (r.tbl == 'targets') {
       _db.execute('DELETE FROM targets');
       final t = (d['targets'] as Map?)?.cast<String, dynamic>() ?? {};

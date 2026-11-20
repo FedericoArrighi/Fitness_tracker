@@ -1,51 +1,31 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import '../charts.dart';
+import '../background.dart';
+import '../csv_import.dart';
 import '../db.dart';
 import '../health_import.dart';
+import '../hevy_api.dart';
 import '../nutrients.dart';
 import '../widgets.dart';
+import '../workout_format.dart';
+import '../workout_types.dart';
+import 'workout_detail_screen.dart';
+import 'workouts_screen.dart';
 
-class _Metric {
-  final String key;
-  final String name;
-  final String unit;
-  final double scale; // stored value * scale = shown value
-  const _Metric(this.key, this.name, this.unit, [this.scale = 1]);
-}
-
-const _metrics = [
-  _Metric('steps', 'Steps', 'steps'),
-  _Metric('active_kcal', 'Active calories', 'kcal'),
-  _Metric('distance_km', 'Distance', 'km'),
-  _Metric('floors', 'Floors climbed', 'floors'),
-  _Metric('resting_hr', 'Resting heart rate', 'bpm'),
-  _Metric('sleep_total', 'Sleep', 'h', 1 / 60),
-  _Metric('sleep_deep', 'Deep sleep', 'h', 1 / 60),
-  _Metric('sleep_light', 'Light sleep', 'h', 1 / 60),
-  _Metric('sleep_rem', 'REM sleep', 'h', 1 / 60),
-  _Metric('sleep_awake', 'Awake during sleep', 'h', 1 / 60),
-  _Metric('body_fat', 'Body fat', '%'),
-];
-
-String _pretty(String t) {
-  final s = t.replaceAll('_', ' ').toLowerCase();
-  return s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
-}
-
-/// Steps, sleep, calories, ... per day, plus the list of workouts.
-class ActivityView extends StatefulWidget {
-  final int range; // days shown
-  const ActivityView({super.key, required this.range});
+/// Imports (Health Connect, Garmin CSV, Hevy CSV) and the list of workouts.
+class ActivityPanel extends StatefulWidget {
+  final VoidCallback onChanged;
+  const ActivityPanel({super.key, required this.onChanged});
 
   @override
-  State<ActivityView> createState() => _ActivityViewState();
+  State<ActivityPanel> createState() => _ActivityPanelState();
 }
 
-class _ActivityViewState extends State<ActivityView> {
-  String _metric = 'steps';
-  Map<String, Map<String, double>> _daily = {};
-  List<Workout> _workouts = [];
-  bool _importing = false;
+class _ActivityPanelState extends State<ActivityPanel> {
+  List<Workout> _workouts = []; // the most recent ones
+  List<Workout> _last30 = [];
+  int _total = 0;
+  bool _busy = false;
   String _status = '';
 
   @override
@@ -54,37 +34,36 @@ class _ActivityViewState extends State<ActivityView> {
     _load();
   }
 
-  @override
-  void didUpdateWidget(covariant ActivityView old) {
-    super.didUpdateWidget(old);
-    if (old.range != widget.range) _load();
-  }
-
-  DateTime get _first {
-    final now = DateTime.now();
-    return DateTime(now.year, now.month, now.day - (widget.range - 1));
-  }
-
   void _load() {
     final now = DateTime.now();
+    final cut = dayKey(DateTime(now.year, now.month, now.day - 29));
     setState(() {
-      _daily = AppDb.instance.loadDailyMetrics(dayKey(_first), dayKey(now));
-      _workouts = AppDb.instance.loadWorkouts(dayKey(_first));
+      _workouts = AppDb.instance.loadWorkouts('1900-01-01', limit: 8);
+      _last30 = AppDb.instance.loadWorkouts(cut);
+      _total = AppDb.instance.countWorkouts();
     });
   }
 
-  Future<void> _import(int days) async {
+  // ---------- Health Connect ----------
+
+  Future<void> _importHealth(int days) async {
     setState(() {
-      _importing = true;
+      _busy = true;
       _status = 'Importing...';
     });
-    final r = await HealthImport.importAll(days: days);
+    final r = await HealthImport.importAll(
+      days: days,
+      onProgress: (t) {
+        if (mounted) setState(() => _status = t);
+      },
+    );
     if (!mounted) return;
     setState(() {
-      _importing = false;
+      _busy = false;
       _status = r.summary;
     });
     _load();
+    widget.onChanged();
   }
 
   Future<void> _importOlder() async {
@@ -93,16 +72,218 @@ class _ActivityViewState extends State<ActivityView> {
       builder: (context) => SimpleDialog(
         title: const Text('Import how far back?'),
         children: [
-          for (final d in [30, 90, 180, 365])
+          const Padding(
+            padding: EdgeInsets.fromLTRB(24, 0, 24, 8),
+            child: Text(
+                'Only data that exists in Health Connect can be imported. '
+                'Long imports take several minutes: keep the app open.',
+                style: TextStyle(fontSize: 12)),
+          ),
+          for (final d in [30, 90, 180, 365, 730, 1095, 1825])
             SimpleDialogOption(
               onPressed: () => Navigator.pop(context, d),
-              child: Text(d == 365 ? '1 year' : '$d days'),
+              child: Text(d < 365
+                  ? '$d days'
+                  : (d == 365 ? '1 year' : '${d ~/ 365} years')),
             ),
         ],
       ),
     );
-    if (days != null) _import(days);
+    if (days != null) _importHealth(days);
   }
+
+  // ---------- Hevy (API) ----------
+
+  Future<void> _hevyKey() async {
+    final ctl = TextEditingController(text: AppDb.instance.getSetting('hevy_api_key') ?? '');
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Hevy API key'),
+        content: SizedBox(
+          width: 400,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                  'In Hevy on the web (hevy.com), open Settings, then Developer, '
+                  'and create an API key. This needs an active Hevy Pro subscription. '
+                  'Set this up on one device only; the sync server passes the '
+                  'workouts on to your other devices.',
+                  style: TextStyle(fontSize: 12)),
+              const SizedBox(height: 8),
+              TextField(
+                controller: ctl,
+                autofocus: true,
+                onSubmitted: (_) => Navigator.pop(context, 'save'),
+                decoration: const InputDecoration(labelText: 'API key'),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(context, 'full'),
+              child: const Text('Save and re-sync everything')),
+          TextButton(
+              onPressed: () => Navigator.pop(context, 'save'),
+              child: const Text('Save')),
+        ],
+      ),
+    );
+    if (choice == null) return;
+    AppDb.instance.setSetting('hevy_api_key', ctl.text.trim());
+    if (ctl.text.trim().isNotEmpty) await _syncHevy(full: choice == 'full');
+  }
+
+  Future<void> _syncHevy({bool full = false}) async {
+    if (!HevySync.configured) {
+      await _hevyKey();
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _status = 'Syncing with Hevy...';
+    });
+    final r = await HevySync.sync(full: full);
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _status = r.summary;
+    });
+    _load();
+    widget.onChanged();
+  }
+
+  // ---------- CSV files ----------
+
+  Future<void> _importCsv(bool garmin) async {
+    final files = await FilePicker.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['csv'],
+    );
+    if (files.isEmpty) return;
+    setState(() {
+      _busy = true;
+      _status = 'Reading the file...';
+    });
+    final bytes = await files.first.readAsBytes();
+    var miles = false;
+    var r = await parseCsvInBackground(garmin: garmin, bytes: bytes, miles: miles);
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _status = '';
+    });
+
+    var reparsing = false;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setS) {
+          final ws = r.workouts;
+          String first = '', last = '';
+          if (ws.isNotEmpty) {
+            final days = ws.map((w) => w.day).toList()..sort();
+            first = days.first;
+            last = days.last;
+          }
+          return AlertDialog(
+            title: Text(garmin ? 'Garmin Connect CSV' : 'Hevy CSV'),
+            content: SizedBox(
+              width: 440,
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (r.error != null)
+                      Text(r.error!,
+                          style: TextStyle(color: Theme.of(context).colorScheme.error))
+                    else ...[
+                      Text('${ws.length} workout(s), $first to $last'),
+                      if (garmin) ...[
+                        const SizedBox(height: 8),
+                        const Text('Distances in the file are in:'),
+                        SegmentedButton<bool>(
+                          segments: const [
+                            ButtonSegment(value: false, label: Text('km')),
+                            ButtonSegment(value: true, label: Text('miles')),
+                          ],
+                          selected: {miles},
+                          onSelectionChanged: (s) async {
+                            miles = s.first;
+                            setS(() => reparsing = true);
+                            final nr = await parseCsvInBackground(
+                                garmin: garmin, bytes: bytes, miles: miles);
+                            r = nr;
+                            setS(() => reparsing = false);
+                          },
+                        ),
+                        if (reparsing) const LinearProgressIndicator(),
+                      ],
+                      const SizedBox(height: 8),
+                      const Text('Preview:'),
+                      for (final w in ws.take(6))
+                        Text(
+                          '${w.day}  ${workoutTitle(w)}  '
+                          '${fmt(w.minutes)} min'
+                          '${w.distanceM != null ? '  ${fmt(w.distanceM! / 1000)} km' : ''}'
+                          '${w.activeKcal != null ? '  ${fmt(w.activeKcal!)} kcal' : ''}',
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      if (ws.length > 6)
+                        const Text('...', style: TextStyle(fontSize: 12)),
+                    ],
+                    const SizedBox(height: 8),
+                    for (final skipped in r.skips.take(6))
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(skipped, style: const TextStyle(fontSize: 11)),
+                      ),
+                    for (final msg in r.warnings)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(msg, style: const TextStyle(fontSize: 12)),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(context, false),
+                  child: const Text('Cancel')),
+              if (r.error == null)
+                TextButton(
+                    onPressed: reparsing ? null : () => Navigator.pop(context, true),
+                    child: const Text('Import')),
+            ],
+          );
+        },
+      ),
+    );
+    if (ok != true || !mounted) return;
+
+    setState(() {
+      _busy = true;
+      _status = 'Importing ${r.workouts.length} workouts...';
+    });
+    final c = await importWorkoutsInBackground(r.workouts);
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _status = 'Imported ${c.added} new workout(s), ${c.updated} updated, '
+          '${c.merged} merged with sessions already recorded by another source, '
+          '${c.unchanged} already present.';
+    });
+    _load();
+    widget.onChanged();
+  }
+
+  // ---------- manual workout ----------
 
   Future<void> _addWorkout() async {
     final type = TextEditingController(text: 'Strength training');
@@ -146,7 +327,7 @@ class _ActivityViewState extends State<ActivityView> {
                       final d = await showDatePicker(
                         context: context,
                         initialDate: day,
-                        firstDate: DateTime(2020),
+                        firstDate: DateTime(2015),
                         lastDate: DateTime(2100),
                       );
                       if (d != null) setS(() => day = d);
@@ -179,67 +360,124 @@ class _ActivityViewState extends State<ActivityView> {
       source: 'manual',
     ));
     _load();
+    widget.onChanged();
   }
 
-  Widget _metricCard() {
-    final title = Theme.of(context).textTheme.titleMedium;
-    final m = _metrics.firstWhere((x) => x.key == _metric);
-    final days = [
-      for (var i = 0; i < widget.range; i++)
-        DateTime(_first.year, _first.month, _first.day + i)
-    ];
-    final values = <double?>[
-      for (final d in days)
-        (_daily[dayKey(d)]?[m.key] == null)
-            ? null
-            : _daily[dayKey(d)]![m.key]! * m.scale
-    ];
-    final known = values.whereType<double>().toList();
-    final avg =
-        known.isEmpty ? null : known.reduce((a, b) => a + b) / known.length;
+  // ---------- display ----------
 
+  Widget _importCard() {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            Text('Import', style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 8),
+            if (HealthImport.supported) ...[
+              const Text(
+                  'Health Connect: your Garmin watch data reaches it through the '
+                  'Garmin Connect app.',
+                  style: TextStyle(fontSize: 12)),
+              const SizedBox(height: 4),
+              Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                children: [
+                  FilledButton.icon(
+                    onPressed: _busy ? null : () => _importHealth(30),
+                    icon: const Icon(Icons.health_and_safety_outlined),
+                    label: const Text('Last 30 days'),
+                  ),
+                  OutlinedButton(
+                    onPressed: _busy ? null : _importOlder,
+                    child: const Text('Older data...'),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+            ],
+            const Text(
+                'Hevy (needs Hevy Pro): reads your workouts directly, no CSV needed. '
+                'Afterwards it updates itself whenever the app starts.',
+                style: TextStyle(fontSize: 12)),
+            const SizedBox(height: 4),
             Wrap(
-              crossAxisAlignment: WrapCrossAlignment.center,
-              spacing: 16,
+              spacing: 8,
+              runSpacing: 4,
               children: [
-                Text('Per day', style: title),
-                DropdownButton<String>(
-                  value: _metric,
-                  items: [
-                    for (final x in _metrics)
-                      DropdownMenuItem(
-                          value: x.key, child: Text('${x.name} (${x.unit})')),
-                  ],
-                  onChanged: (v) => setState(() => _metric = v!),
+                FilledButton.icon(
+                  onPressed: _busy ? null : () => _syncHevy(),
+                  icon: const Icon(Icons.sync),
+                  label: const Text('Sync Hevy'),
+                ),
+                TextButton(
+                  onPressed: _busy ? null : _hevyKey,
+                  child: const Text('API key...'),
                 ),
               ],
             ),
-            const SizedBox(height: 8),
-            DailyBarChart(
-              days: days,
-              values: values,
-              partial: List.filled(days.length, false),
+            const SizedBox(height: 12),
+            const Text(
+                'CSV files: workouts exported from Garmin Connect (website, '
+                'Activities, Export CSV) or from Hevy (Settings, Export & Import).',
+                style: TextStyle(fontSize: 12)),
+            const SizedBox(height: 4),
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _busy ? null : () => _importCsv(true),
+                  icon: const Icon(Icons.upload_file),
+                  label: const Text('Garmin CSV'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _busy ? null : () => _importCsv(false),
+                  icon: const Icon(Icons.fitness_center),
+                  label: const Text('Hevy CSV'),
+                ),
+              ],
             ),
-            const SizedBox(height: 8),
-            Text(avg == null
-                ? 'No ${m.name.toLowerCase()} data in this period.'
-                : 'Average on the ${known.length} day(s) with data: '
-                    '${fmt(avg)} ${m.unit}'),
+            if (_busy)
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: LinearProgressIndicator(),
+              ),
+            if (_status.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(_status),
+              ),
           ],
         ),
       ),
     );
   }
 
+  Future<void> _open(Workout w) async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => WorkoutDetailScreen(workoutId: w.id)),
+    );
+    _load();
+    widget.onChanged();
+  }
+
+  Future<void> _openAll() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const WorkoutsScreen()),
+    );
+    _load();
+    widget.onChanged();
+  }
+
   Widget _workoutCard() {
     final title = Theme.of(context).textTheme.titleMedium;
-    final totalMin = _workouts.fold<double>(0, (s, w) => s + w.minutes);
+    final recent = _last30;
+    final recentMin = recent.fold<double>(0, (s, w) => s + w.minutes);
+
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -257,27 +495,24 @@ class _ActivityViewState extends State<ActivityView> {
               ],
             ),
             Text(_workouts.isEmpty
-                ? 'No workouts in this period.'
-                : '${_workouts.length} workout(s), ${fmt(totalMin / 60)} h in total'),
-            for (final w in _workouts.take(40))
+                ? 'No workouts yet.'
+                : '$_total in total. Last 30 days: ${recent.length} '
+                    'workout(s), ${fmt(recentMin / 60)} h.'),
+            for (final w in _workouts.take(8))
               ListTile(
                 dense: true,
                 contentPadding: EdgeInsets.zero,
-                title: Text(w.title.isNotEmpty ? w.title : _pretty(w.type)),
-                subtitle: Text([
-                  w.day,
-                  '${fmt(w.minutes)} min',
-                  if (w.distanceM != null && w.distanceM! > 0)
-                    '${fmt(w.distanceM! / 1000)} km',
-                  if (w.activeKcal != null) '${fmt(w.activeKcal!)} kcal',
-                ].join('  |  ')),
-                trailing: IconButton(
-                  icon: const Icon(Icons.delete_outline),
-                  tooltip: 'Delete',
-                  onPressed: () {
-                    AppDb.instance.deleteWorkout(w.id);
-                    _load();
-                  },
+                leading: Icon(catIcon(categoryOf(w.type))),
+                title: Text(workoutTitle(w)),
+                subtitle: Text(summaryLine(w)),
+                onTap: () => _open(w),
+              ),
+            if (_workouts.isNotEmpty)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton(
+                  onPressed: _openAll,
+                  child: const Text('All workouts, by type...'),
                 ),
               ),
           ],
@@ -288,50 +523,10 @@ class _ActivityViewState extends State<ActivityView> {
 
   @override
   Widget build(BuildContext context) {
-    return ListView(
-      padding: const EdgeInsets.all(12),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (HealthImport.supported)
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                      'Your Garmin watch data reaches Health Connect through the '
-                      'Garmin Connect app. This imports it here.',
-                      style: TextStyle(fontSize: 12)),
-                  const SizedBox(height: 8),
-                  Wrap(
-                    spacing: 8,
-                    children: [
-                      FilledButton.icon(
-                        onPressed: _importing ? null : () => _import(30),
-                        icon: const Icon(Icons.health_and_safety_outlined),
-                        label: const Text('Import last 30 days'),
-                      ),
-                      OutlinedButton(
-                        onPressed: _importing ? null : _importOlder,
-                        child: const Text('Older data...'),
-                      ),
-                    ],
-                  ),
-                  if (_importing)
-                    const Padding(
-                      padding: EdgeInsets.only(top: 8),
-                      child: LinearProgressIndicator(),
-                    ),
-                  if (_status.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: Text(_status),
-                    ),
-                ],
-              ),
-            ),
-          ),
-        _metricCard(),
+        _importCard(),
         _workoutCard(),
       ],
     );

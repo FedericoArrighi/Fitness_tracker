@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:math';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import '../db.dart';
 import '../nutrients.dart';
 import '../online.dart';
+import 'barcode_screen.dart';
 import 'food_edit_screen.dart';
 import 'online_search_screen.dart';
 
@@ -167,6 +169,31 @@ class _FoodsScreenState extends State<FoodsScreen> {
     if (saved == true) _loadLocal();
   }
 
+  Future<void> _scan() async {
+    final code = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(builder: (_) => const BarcodeScreen()),
+    );
+    if (code == null || !mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(SnackBar(
+        content: Text('Looking up $code ...'), duration: const Duration(seconds: 2)));
+    try {
+      final f = await lookupBarcode(code);
+      if (!mounted) return;
+      if (f == null) {
+        messenger.showSnackBar(SnackBar(
+            content: Text('The barcode $code is not in Open Food Facts.'),
+            duration: const Duration(seconds: 4)));
+        return;
+      }
+      await _tapOnline(f);
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(
+          content: Text('Lookup failed: $e'), duration: const Duration(seconds: 4)));
+    }
+  }
+
   Future<void> _openSearchScreen() async {
     final saved = await Navigator.push<bool>(
       context,
@@ -213,6 +240,12 @@ class _FoodsScreenState extends State<FoodsScreen> {
       appBar: AppBar(
         title: Text(widget.pickMode ? 'Choose a food' : 'Foods'),
         actions: [
+          if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android)
+            IconButton(
+              icon: const Icon(Icons.qr_code_scanner),
+              tooltip: 'Scan a barcode',
+              onPressed: _scan,
+            ),
           IconButton(
             icon: const Icon(Icons.travel_explore),
             tooltip: 'Online search by source',
