@@ -115,6 +115,7 @@ const metricLabels = <String, MetricLabel>{
   'laps': MetricLabel('Laps', ''),
   'best_lap_s': MetricLabel('Best lap time', 's', 1),
   'steps': MetricLabel('Steps', ''),
+  'rpe': MetricLabel('RPE (effort 1-10)', '', 1),
   'sets': MetricLabel('Sets', ''),
   'reps': MetricLabel('Repetitions', ''),
   'volume_kg': MetricLabel('Volume (weight x reps)', 'kg'),
@@ -128,16 +129,16 @@ List<String> metricOrder(Cat c) {
     case Cat.run:
     case Cat.walk:
     case Cat.hike:
-      return ['avg_hr', 'max_hr', 'ascent_m', 'descent_m', 'cadence_avg', 'cadence_max', 'stride_m', 'power_avg', 'power_max', 'vert_osc', 'vert_ratio', 'gct_ms', 'te_aerobic', 'tss', 'grit', 'flow', 'steps', 'elev_min', 'elev_max'];
+      return ['avg_hr', 'max_hr', 'ascent_m', 'descent_m', 'cadence_avg', 'cadence_max', 'stride_m', 'power_avg', 'power_max', 'vert_osc', 'vert_ratio', 'gct_ms', 'te_aerobic', 'rpe', 'tss', 'grit', 'flow', 'steps', 'elev_min', 'elev_max'];
     case Cat.cycle:
-      return ['avg_hr', 'max_hr', 'ascent_m', 'descent_m', 'power_avg', 'power_max', 'cadence_avg', 'cadence_max', 'te_aerobic', 'tss', 'grit', 'flow', 'elev_min', 'elev_max'];
+      return ['avg_hr', 'max_hr', 'ascent_m', 'descent_m', 'power_avg', 'power_max', 'cadence_avg', 'cadence_max', 'te_aerobic', 'rpe', 'tss', 'grit', 'flow', 'elev_min', 'elev_max'];
     case Cat.swim:
-      return ['avg_hr', 'max_hr', 'swolf', 'stroke_rate', 'laps', 'best_lap_s', 'te_aerobic'];
+      return ['avg_hr', 'max_hr', 'swolf', 'stroke_rate', 'laps', 'best_lap_s', 'te_aerobic', 'rpe'];
     case Cat.strength:
-      return ['sets', 'reps', 'volume_kg', 'avg_hr', 'max_hr', 'te_aerobic'];
+      return ['sets', 'reps', 'volume_kg', 'rpe', 'avg_hr', 'max_hr', 'te_aerobic'];
     case Cat.climb:
       return ['avg_hr', 'max_hr', 'ascent_m', 'descent_m', 'reps', 'te_aerobic', 'grit', 'flow'];
     default:
-      return ['avg_hr', 'max_hr', 'te_aerobic', 'steps'];
+      return ['avg_hr', 'max_hr', 'te_aerobic', 'rpe', 'steps'];
   }
 }

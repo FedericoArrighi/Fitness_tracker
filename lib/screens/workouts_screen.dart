@@ -3,11 +3,14 @@ import '../db.dart';
 import '../nutrients.dart';
 import '../workout_format.dart';
 import '../workout_types.dart';
+import 'add_workout_dialog.dart';
 import 'workout_detail_screen.dart';
 
 /// All workouts, with a filter by kind of activity.
 class WorkoutsScreen extends StatefulWidget {
-  const WorkoutsScreen({super.key});
+  /// true when it sits inside another screen (no app bar of its own)
+  final bool embedded;
+  const WorkoutsScreen({super.key, this.embedded = false});
 
   @override
   State<WorkoutsScreen> createState() => _WorkoutsScreenState();
@@ -58,7 +61,16 @@ class _WorkoutsScreenState extends State<WorkoutsScreen> {
     final shown = list.take(_limit).toList();
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Workouts')),
+      appBar: widget.embedded ? null : AppBar(title: const Text('Workouts')),
+      floatingActionButton: widget.embedded
+          ? FloatingActionButton(
+              tooltip: 'Add a workout',
+              onPressed: () async {
+                if (await showAddWorkoutDialog(context)) _load();
+              },
+              child: const Icon(Icons.add),
+            )
+          : null,
       body: Column(
         children: [
           SingleChildScrollView(

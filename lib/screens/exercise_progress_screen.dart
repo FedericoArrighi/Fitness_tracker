@@ -20,10 +20,12 @@ List<Map<String, dynamic>> _workingSets(Map<String, dynamic> ex) => [
 String _setText(Map<String, dynamic> s) {
   final kg = (s['kg'] as num?)?.toDouble();
   final reps = (s['reps'] as num?)?.toDouble();
+  final rpe = (s['rpe'] as num?)?.toDouble();
+  final at = (rpe != null && rpe > 0) ? ' @${rawNum((rpe * 10).round() / 10)}' : '';
   if (kg != null && kg > 0 && reps != null) {
-    return '${rawNum((kg * 10).round() / 10)}×${reps.round()}';
+    return '${rawNum((kg * 10).round() / 10)}×${reps.round()}$at';
   }
-  if (reps != null && reps > 0) return '${reps.round()} reps';
+  if (reps != null && reps > 0) return '${reps.round()} reps$at';
   return 'set';
 }
 
@@ -38,7 +40,9 @@ class _ExStat {
 
 /// All exercises you have done, most frequent first.
 class ExerciseListScreen extends StatefulWidget {
-  const ExerciseListScreen({super.key});
+  /// true when it sits inside another screen (no app bar of its own)
+  final bool embedded;
+  const ExerciseListScreen({super.key, this.embedded = false});
 
   @override
   State<ExerciseListScreen> createState() => _ExerciseListScreenState();
@@ -76,7 +80,7 @@ class _ExerciseListScreenState extends State<ExerciseListScreen> {
     final q = _q.trim().toLowerCase();
     final list = q.isEmpty ? _stats : [for (final s in _stats) if (s.name.toLowerCase().contains(q)) s];
     return Scaffold(
-      appBar: AppBar(title: const Text('Lift progress')),
+      appBar: widget.embedded ? null : AppBar(title: const Text('Lift progress')),
       body: Column(
         children: [
           Padding(

@@ -9,6 +9,10 @@ import '../workout_types.dart';
 import 'analysis_screen.dart';
 import 'exercise_progress_screen.dart';
 import 'gym_workout_screen.dart';
+import 'lift_tools_screen.dart';
+import 'muscle_volume_screen.dart';
+import 'routines_screen.dart';
+import 'weekly_volume_screen.dart';
 import 'workout_detail_screen.dart';
 
 /// Statistics of your workouts: totals per week / month / year with
@@ -265,6 +269,26 @@ class _TrainingViewState extends State<TrainingView> {
             },
           ),
         ),
+        Card(
+          child: ListTile(
+            leading: const Icon(Icons.playlist_play),
+            title: const Text('Routines'),
+            subtitle: Text(() {
+              final n = AppDb.instance.loadItems('gym_template').length;
+              return n == 0
+                  ? 'Save a workout as a routine and start it with the weights filled in'
+                  : '$n saved routine(s)';
+            }()),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () async {
+              await Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const RoutinesScreen()),
+              );
+              if (mounted) setState(() {});
+            },
+          ),
+        ),
         _controls(),
         _summary(),
         _byType(),
@@ -287,6 +311,42 @@ class _TrainingViewState extends State<TrainingView> {
                 const SizedBox(height: 8),
                 _Heatmap(workouts: _all),
               ],
+            ),
+          ),
+        ),
+        Card(
+          child: ListTile(
+            leading: const Icon(Icons.calculate_outlined),
+            title: const Text('Lifting tools'),
+            subtitle: const Text('Plate calculator and 1RM calculator'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const LiftToolsScreen()),
+            ),
+          ),
+        ),
+        Card(
+          child: ListTile(
+            leading: const Icon(Icons.accessibility_new),
+            title: const Text('Muscle groups'),
+            subtitle: const Text('Hard sets per week for each muscle'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const MuscleVolumeScreen()),
+            ),
+          ),
+        ),
+        Card(
+          child: ListTile(
+            leading: const Icon(Icons.bar_chart),
+            title: const Text('Weekly volume'),
+            subtitle: const Text('Running and gym volume per week with trend and statistics'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const WeeklyVolumeScreen()),
             ),
           ),
         ),

@@ -1,7 +1,9 @@
+import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import '../background.dart';
 import '../csv_import.dart';
+import '../garmin_export.dart';
 import '../db.dart';
 import '../health_import.dart';
 import '../hevy_api.dart';
@@ -9,8 +11,6 @@ import '../nutrients.dart';
 import '../widgets.dart';
 import '../workout_format.dart';
 import '../workout_types.dart';
-import 'workout_detail_screen.dart';
-import 'workouts_screen.dart';
 
 /// Imports (Health Connect, Garmin CSV, Hevy CSV) and the list of workouts.
 class ActivityPanel extends StatefulWidget {
@@ -22,27 +22,8 @@ class ActivityPanel extends StatefulWidget {
 }
 
 class _ActivityPanelState extends State<ActivityPanel> {
-  List<Workout> _workouts = []; // the most recent ones
-  List<Workout> _last30 = [];
-  int _total = 0;
   bool _busy = false;
   String _status = '';
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  void _load() {
-    final now = DateTime.now();
-    final cut = dayKey(DateTime(now.year, now.month, now.day - 29));
-    setState(() {
-      _workouts = AppDb.instance.loadWorkouts('1900-01-01', limit: 8);
-      _last30 = AppDb.instance.loadWorkouts(cut);
-      _total = AppDb.instance.countWorkouts();
-    });
-  }
 
   // ---------- Health Connect ----------
 
@@ -62,7 +43,6 @@ class _ActivityPanelState extends State<ActivityPanel> {
       _busy = false;
       _status = r.summary;
     });
-    _load();
     widget.onChanged();
   }
 
@@ -153,7 +133,6 @@ class _ActivityPanelState extends State<ActivityPanel> {
       _busy = false;
       _status = r.summary;
     });
-    _load();
     widget.onChanged();
   }
 
@@ -279,87 +258,97 @@ class _ActivityPanelState extends State<ActivityPanel> {
           '${c.merged} merged with sessions already recorded by another source, '
           '${c.unchanged} already present.';
     });
-    _load();
     widget.onChanged();
   }
 
-  // ---------- manual workout ----------
+  // ---------- Garmin full export (JSON files) ----------
 
-  Future<void> _addWorkout() async {
-    final type = TextEditingController(text: 'Strength training');
-    final mins = TextEditingController();
-    final kcal = TextEditingController();
-    var day = DateTime.now();
+  Future<void> _importGarminExport() async {
+    final files = await FilePicker.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['json'],
+    );
+    if (files.isEmpty) return;
+    setState(() {
+      _busy = true;
+      _status = 'Reading ${files.length} file(s)...';
+    });
+    final data = <String, Uint8List>{};
+    for (final f in files) {
+      data[f.name] = await f.readAsBytes();
+    }
+    final r = await parseGarminExportInBackground(data);
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _status = '';
+    });
+    final ws = r.workouts;
+    final dayKeys = r.days.keys.toList()..sort();
     final ok = await showDialog<bool>(
       context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setS) {
-          void submit() {
-            final m = parseNum(mins.text);
-            if (type.text.trim().isEmpty || m == null || m <= 0) return;
-            Navigator.pop(context, true);
-          }
-
-          return AlertDialog(
-            title: const Text('Add workout'),
-            content: SizedBox(
-              width: 360,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextField(
-                    controller: type,
-                    autofocus: true,
-                    decoration: const InputDecoration(labelText: 'Type'),
-                  ),
-                  numField(
-                      controller: mins,
-                      label: 'Duration',
-                      suffix: 'min',
-                      onSubmitted: (_) => submit()),
-                  numField(
-                      controller: kcal,
-                      label: 'Active calories (optional)',
-                      suffix: 'kcal',
-                      onSubmitted: (_) => submit()),
-                  TextButton(
-                    onPressed: () async {
-                      final d = await showDatePicker(
-                        context: context,
-                        initialDate: day,
-                        firstDate: DateTime(2015),
-                        lastDate: DateTime(2100),
-                      );
-                      if (d != null) setS(() => day = d);
-                    },
-                    child: Text('Date: ${dayKey(day)}'),
-                  ),
+      builder: (context) => AlertDialog(
+        title: const Text('Garmin full export'),
+        content: SizedBox(
+          width: 440,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (r.error != null)
+                  Text(r.error!,
+                      style: TextStyle(color: Theme.of(context).colorScheme.error))
+                else ...[
+                  Text('${ws.length} workout(s), ${dayKeys.length} day(s) with '
+                      'steps / sleep / heart rate'
+                      '${dayKeys.isEmpty ? '' : ' (${dayKeys.first} to ${dayKeys.last})'}'),
+                  const SizedBox(height: 8),
+                  const Text('Preview:'),
+                  for (final w in (ws.toList()..sort((a, b) => b.startMs.compareTo(a.startMs))).take(6))
+                    Text(
+                      '${w.day}  ${workoutTitle(w)}  ${fmt(w.minutes)} min'
+                      '${w.distanceM != null ? '  ${fmt(w.distanceM! / 1000)} km' : ''}',
+                      style: const TextStyle(fontSize: 12),
+                    ),
                 ],
-              ),
+                const SizedBox(height: 8),
+                for (final msg in r.warnings)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(msg, style: const TextStyle(fontSize: 12)),
+                  ),
+              ],
             ),
-            actions: [
-              TextButton(
-                  onPressed: () => Navigator.pop(context, false),
-                  child: const Text('Cancel')),
-              TextButton(onPressed: submit, child: const Text('Add')),
-            ],
-          );
-        },
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          if (r.error == null)
+            TextButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Import')),
+        ],
       ),
     );
-    final m = parseNum(mins.text);
-    if (ok != true || m == null || m <= 0) return;
-    final start = DateTime(day.year, day.month, day.day, 12);
-    AppDb.instance.saveWorkout(Workout(
-      id: newId(),
-      day: dayKey(day),
-      startMs: start.millisecondsSinceEpoch,
-      endMs: start.add(Duration(minutes: m.round())).millisecondsSinceEpoch,
-      type: type.text.trim(),
-      activeKcal: parseNum(kcal.text),
-      source: 'manual',
-    ));
-    _load();
+    if (ok != true || !mounted) return;
+
+    setState(() {
+      _busy = true;
+      _status = 'Importing ${ws.length} workouts and ${dayKeys.length} days...';
+    });
+    final c = await importGarminExportInBackground(r.workouts, r.days,
+        kcalFixes: r.kcalFixes);
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _status = 'Workouts: ${c.workouts.added} new, ${c.workouts.updated} updated, '
+          '${c.workouts.merged} merged with sessions from another source, '
+          '${c.workouts.unchanged} already present. '
+          'Days: ${c.daysAdded} new, ${c.daysFilled} completed with missing values.';
+    });
     widget.onChanged();
   }
 
@@ -437,6 +426,11 @@ class _ActivityPanelState extends State<ActivityPanel> {
                   icon: const Icon(Icons.fitness_center),
                   label: const Text('Hevy CSV'),
                 ),
+                OutlinedButton.icon(
+                  onPressed: _busy ? null : _importGarminExport,
+                  icon: const Icon(Icons.folder_zip),
+                  label: const Text('Garmin full export'),
+                ),
               ],
             ),
             if (_busy)
@@ -455,79 +449,12 @@ class _ActivityPanelState extends State<ActivityPanel> {
     );
   }
 
-  Future<void> _open(Workout w) async {
-    await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => WorkoutDetailScreen(workoutId: w.id)),
-    );
-    _load();
-    widget.onChanged();
-  }
-
-  Future<void> _openAll() async {
-    await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const WorkoutsScreen()),
-    );
-    _load();
-    widget.onChanged();
-  }
-
-  Widget _workoutCard() {
-    final title = Theme.of(context).textTheme.titleMedium;
-    final recent = _last30;
-    final recentMin = recent.fold<double>(0, (s, w) => s + w.minutes);
-
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(child: Text('Workouts', style: title)),
-                TextButton.icon(
-                  onPressed: _addWorkout,
-                  icon: const Icon(Icons.add),
-                  label: const Text('Add'),
-                ),
-              ],
-            ),
-            Text(_workouts.isEmpty
-                ? 'No workouts yet.'
-                : '$_total in total. Last 30 days: ${recent.length} '
-                    'workout(s), ${fmt(recentMin / 60)} h.'),
-            for (final w in _workouts.take(8))
-              ListTile(
-                dense: true,
-                contentPadding: EdgeInsets.zero,
-                leading: Icon(catIcon(categoryOf(w.type))),
-                title: Text(workoutTitle(w)),
-                subtitle: Text(summaryLine(w)),
-                onTap: () => _open(w),
-              ),
-            if (_workouts.isNotEmpty)
-              Align(
-                alignment: Alignment.centerLeft,
-                child: TextButton(
-                  onPressed: _openAll,
-                  child: const Text('All workouts, by type...'),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _importCard(),
-        _workoutCard(),
       ],
     );
   }

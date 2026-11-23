@@ -169,7 +169,8 @@ double? averageOf(Iterable<Workout> ws, String key) {
 
 class LiftSet {
   final double kg, reps;
-  const LiftSet(this.kg, this.reps);
+  final double? rpe; // effort 1-10 if it was logged
+  const LiftSet(this.kg, this.reps, [this.rpe]);
 }
 
 /// All working sets of one exercise in one workout.
@@ -222,7 +223,9 @@ List<LiftSet> _workingSets(Map<String, dynamic> ex) {
     if ((m['type'] ?? 'normal') == 'warmup') continue;
     final reps = (m['reps'] as num?)?.toDouble() ?? 0;
     if (reps <= 0) continue;
-    out.add(LiftSet((m['kg'] as num?)?.toDouble() ?? 0, reps));
+    final rpe = (m['rpe'] as num?)?.toDouble();
+    out.add(LiftSet((m['kg'] as num?)?.toDouble() ?? 0, reps,
+        (rpe != null && rpe > 0) ? rpe : null));
   }
   return out;
 }

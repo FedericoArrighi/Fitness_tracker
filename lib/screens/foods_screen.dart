@@ -35,7 +35,15 @@ class FoodsScreen extends StatefulWidget {
 
   /// In pickMode, also list recipes (for logging, not for ingredients).
   final bool includeRecipes;
-  const FoodsScreen({super.key, this.pickMode = false, this.includeRecipes = false});
+
+  /// Start with only your favourites (the star on a food) on show.
+  final bool initialFavorites;
+  const FoodsScreen({
+    super.key,
+    this.pickMode = false,
+    this.includeRecipes = false,
+    this.initialFavorites = false,
+  });
 
   @override
   State<FoodsScreen> createState() => _FoodsScreenState();
@@ -51,10 +59,13 @@ class _FoodsScreenState extends State<FoodsScreen> {
   String? _onlineError;
   int _token = 0; // identifies the latest search; older answers are ignored
   Timer? _debounce;
+  bool _onlyFavs = false;
+  Set<String> _favs = {};
 
   @override
   void initState() {
     super.initState();
+    _onlyFavs = widget.initialFavorites;
     _loadLocal();
   }
 
@@ -67,11 +78,33 @@ class _FoodsScreenState extends State<FoodsScreen> {
   void _loadLocal() {
     setState(() {
       final withRecipes = widget.pickMode && widget.includeRecipes;
-      var list = AppDb.instance.loadFoods(_query, withRecipes);
-      if (widget.pickMode && _query.trim().isEmpty) {
-        final recent = AppDb.instance.loadRecentFoods(15, withRecipes);
-        final ids = recent.map((f) => f.id).toSet();
-        list = [...recent, ...list.where((f) => !ids.contains(f.id))];
+      final db = AppDb.instance;
+      _favs = db.favoriteFoodIds();
+      List<Food> list;
+      if (_onlyFavs) {
+        final words = _query
+            .trim()
+            .toLowerCase()
+            .split(RegExp(r'\s+'))
+            .where((w) => w.isNotEmpty)
+            .toList();
+        list = [
+          for (final f in db.loadFoodsByIds(_favs, withRecipes))
+            if (words.every((w) => f.name.toLowerCase().contains(w))) f
+        ];
+      } else {
+        list = db.loadFoods(_query, withRecipes);
+        if (widget.pickMode && _query.trim().isEmpty) {
+          final recent = db.loadRecentFoods(15, withRecipes);
+          final ids = recent.map((f) => f.id).toSet();
+          list = [...recent, ...list.where((f) => !ids.contains(f.id))];
+        }
+        if (_query.trim().isEmpty && _favs.isNotEmpty) {
+          // favourites first
+          final favFoods = db.loadFoodsByIds(_favs, withRecipes);
+          final favIds = favFoods.map((f) => f.id).toSet();
+          list = [...favFoods, ...list.where((f) => !favIds.contains(f.id))];
+        }
       }
       _local = list;
     });
@@ -275,6 +308,21 @@ class _FoodsScreenState extends State<FoodsScreen> {
               onSubmitted: _submit,
             ),
           ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: FilterChip(
+                avatar: const Icon(Icons.star, size: 18),
+                label: const Text('Favourites only'),
+                selected: _onlyFavs,
+                onSelected: (v) {
+                  _onlyFavs = v;
+                  _loadLocal();
+                },
+              ),
+            ),
+          ),
           if (_loadingOnline) const LinearProgressIndicator(),
           if (_onlineError != null)
             Padding(
@@ -286,9 +334,11 @@ class _FoodsScreenState extends State<FoodsScreen> {
           Expanded(
             child: nothing
                 ? Center(
-                    child: Text(_query.trim().length < 3
-                        ? 'No foods yet. Tap + or type to search online.'
-                        : 'No results.'))
+                    child: Text(_onlyFavs
+                        ? 'No favourites yet. Tap the star next to a food.'
+                        : (_query.trim().length < 3
+                            ? 'No foods yet. Tap + or type to search online.'
+                            : 'No results.')))
                 : ListView(
                     children: [
                       for (final f in _local)
@@ -301,6 +351,16 @@ class _FoodsScreenState extends State<FoodsScreen> {
                               (f.values['calories'] == null
                                   ? 'No calorie value'
                                   : '${fmt(f.values['calories']!)} kcal / 100 g')),
+                          trailing: IconButton(
+                            icon: Icon(_favs.contains(f.id) ? Icons.star : Icons.star_border),
+                            tooltip: _favs.contains(f.id)
+                                ? 'Remove from favourites'
+                                : 'Add to favourites',
+                            onPressed: () {
+                              AppDb.instance.setFavorite(f.id, !_favs.contains(f.id));
+                              _loadLocal();
+                            },
+                          ),
                           onTap: () => widget.pickMode
                               ? Navigator.pop(context, f)
                               : _editLocal(f),

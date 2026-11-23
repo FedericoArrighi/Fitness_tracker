@@ -65,6 +65,9 @@ const activityMetrics = [
       scale: 1 / 60),
   MetricDef('act:sleep_rem', 'REM sleep', 'h', 'act', 'sleep_rem',
       scale: 1 / 60),
+  MetricDef('act:sleep_score', 'Sleep score', '', 'act', 'sleep_score',
+      line: true),
+  MetricDef('act:vo2max', 'VO2 max', 'ml/kg/min', 'act', 'vo2max', line: true),
   MetricDef('act:sleep_awake', 'Awake during sleep', 'h', 'act', 'sleep_awake',
       scale: 1 / 60),
 ];
@@ -94,6 +97,7 @@ List<MetricDef> trainingMetrics(Cat? cat) {
         d('pace', 'Pace', 'min/km', line: true),
         count,
         elev,
+        d('rpe', 'RPE (effort)', '', line: true),
         hr,
         kcal,
       ];
@@ -123,6 +127,7 @@ List<MetricDef> trainingMetrics(Cat? cat) {
         d('sets', 'Sets', '', additive: true),
         d('volume', 'Volume (weight x reps)', 'kg', additive: true),
         d('reps', 'Repetitions', '', additive: true),
+        d('rpe', 'RPE (effort)', '', line: true),
         hr,
         kcal,
       ];
@@ -149,6 +154,9 @@ List<MetricDef> exerciseMetrics(String name) => [
       MetricDef('ex:volume', 'Volume per session', 'kg', 'exercise',
           'volume|$name',
           additive: true, zeroFill: true, defaultAgg: AggMode.sum),
+      MetricDef('ex:rpe', 'Average RPE per session', '', 'exercise',
+          'rpe|$name',
+          line: true),
       MetricDef('ex:reps', 'Repetitions per session', '', 'exercise',
           'reps|$name',
           additive: true, zeroFill: true, defaultAgg: AggMode.sum),
@@ -174,7 +182,10 @@ DailyData loadDailyData(MetricDef m, DateTime from, DateTime to) {
     case 'act':
       db.loadDailyMetrics(f, t).forEach((day, mm) {
         final v = mm[m.key];
-        if (v != null) values[day] = v * m.scale;
+        // more than 14 h of sleep in a day is wrong data (duplicate records)
+        if (v != null && !(v > 840 && m.key.startsWith('sleep_'))) {
+          values[day] = v * m.scale;
+        }
       });
       break;
     case 'weight':
@@ -216,6 +227,8 @@ Map<String, double> _workoutValues(String key, String f, String t) {
   final reps = <String, double>{};
   final hrW = <String, double>{};
   final hrM = <String, double>{};
+  final rpeW = <String, double>{};
+  final rpeM = <String, double>{};
   void add(Map<String, double> m, String d, double v) => m[d] = (m[d] ?? 0) + v;
   for (final w in ws) {
     if (cat != null && categoryOf(w.type) != cat) continue;
@@ -231,6 +244,11 @@ Map<String, double> _workoutValues(String key, String f, String t) {
     if (hr != null) {
       add(hrW, w.day, hr * w.minutes);
       add(hrM, w.day, w.minutes);
+    }
+    final rpe = w.metrics['rpe'];
+    if (rpe != null && rpe > 0) {
+      add(rpeW, w.day, rpe);
+      add(rpeM, w.day, 1);
     }
   }
   final out = <String, double>{};
@@ -284,6 +302,12 @@ Map<String, double> _workoutValues(String key, String f, String t) {
     case 'reps':
       positive(reps);
       break;
+    case 'rpe':
+      rpeW.forEach((d, v) {
+        final n = rpeM[d] ?? 0;
+        if (n > 0) out[d] = v / n;
+      });
+      break;
     case 'hr':
       hrW.forEach((d, v) {
         final mm = hrM[d] ?? 0;
@@ -300,6 +324,7 @@ Map<String, double> _exerciseValues(String key, String f, String t) {
   final kind = key.substring(0, i);
   final name = key.substring(i + 1).trim().toLowerCase();
   final out = <String, double>{};
+  final rpeN = <String, double>{};
   for (final w in AppDb.instance.loadAllWorkouts(withEx: true)) {
     if (w.day.compareTo(f) < 0 || w.day.compareTo(t) > 0) continue;
     for (final ex in w.exercises) {
@@ -327,9 +352,19 @@ Map<String, double> _exerciseValues(String key, String f, String t) {
           case 'reps':
             if (reps != null) out[w.day] = (out[w.day] ?? 0) + reps;
             break;
+          case 'rpe':
+            final r = (m['rpe'] as num?)?.toDouble();
+            if (r != null && r > 0) {
+              out[w.day] = (out[w.day] ?? 0) + r;
+              rpeN[w.day] = (rpeN[w.day] ?? 0) + 1;
+            }
+            break;
         }
       }
     }
+  }
+  if (kind == 'rpe') {
+    rpeN.forEach((d, n) => out[d] = out[d]! / n);
   }
   return out;
 }

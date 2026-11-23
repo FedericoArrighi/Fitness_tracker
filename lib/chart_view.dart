@@ -185,7 +185,17 @@ class MetricChart extends StatefulWidget {
 
 class _MetricChartState extends State<MetricChart> {
   late ChartConfig _c;
-  int? _hover;
+  // The position under the finger or mouse. Only the chart itself is redrawn
+  // when it changes, not the whole widget (this was slow on a desktop).
+  final ValueNotifier<int?> _hoverN = ValueNotifier<int?>(null);
+  int? get _hover => _hoverN.value;
+  set _hover(int? v) => _hoverN.value = v;
+
+  @override
+  void dispose() {
+    _hoverN.dispose();
+    super.dispose();
+  }
 
   // computed by _compute()
   Bucket _eff = Bucket.day;
@@ -605,27 +615,31 @@ class _MetricChartState extends State<MetricChart> {
           }
 
           return MouseRegion(
-            onHover: (e) => setState(() => _hover = indexAt(e.localPosition.dx)),
-            onExit: (_) => setState(() => _hover = null),
+            onHover: (e) => _hover = indexAt(e.localPosition.dx),
+            onExit: (_) => _hover = null,
             child: GestureDetector(
-              onTapDown: (d) => setState(() => _hover = indexAt(d.localPosition.dx)),
-              onHorizontalDragUpdate: (d) =>
-                  setState(() => _hover = indexAt(d.localPosition.dx)),
+              onTapDown: (d) => _hover = indexAt(d.localPosition.dx),
+              onHorizontalDragUpdate: (d) => _hover = indexAt(d.localPosition.dx),
               child: SizedBox(
                 height: chartH,
                 width: w,
-                child: CustomPaint(
-                  painter: _ChartPainter(
-                    values: _vals,
-                    partial: _partial,
-                    cmp: _cmp,
-                    trend: _trend,
-                    xLabels: _xl,
-                    isLine: isLine,
-                    target: _target,
-                    hover: _hover,
-                    tips: _tips,
-                    cs: cs,
+                child: RepaintBoundary(
+                  child: ValueListenableBuilder<int?>(
+                    valueListenable: _hoverN,
+                    builder: (context, hover, _) => CustomPaint(
+                      painter: _ChartPainter(
+                        values: _vals,
+                        partial: _partial,
+                        cmp: _cmp,
+                        trend: _trend,
+                        xLabels: _xl,
+                        isLine: isLine,
+                        target: _target,
+                        hover: hover,
+                        tips: _tips,
+                        cs: cs,
+                      ),
+                    ),
                   ),
                 ),
               ),

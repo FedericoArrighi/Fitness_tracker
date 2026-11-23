@@ -1,6 +1,9 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import '../db.dart';
+import '../fitness.dart';
 import '../nutrients.dart';
+import '../routines.dart';
 import '../widgets.dart';
 import 'gym_workout_screen.dart';
 import '../workout_format.dart';
@@ -18,6 +21,7 @@ String _hms(double s) {
 String _sourceLabel(String s) => switch (s) {
       'health_connect' => 'Health Connect (from the Garmin Connect app)',
       'garmin_csv' => 'Garmin CSV file',
+      'garmin_export' => 'Garmin full data export',
       'hevy' => 'Hevy',
       'manual' => 'Entered or edited by you',
       'app' => 'Logged in this app',
@@ -112,6 +116,204 @@ class _WorkoutDetailScreenState extends State<WorkoutDetailScreen> {
       source: 'manual',
     ));
     _load();
+  }
+
+  static const _rpeWords = {
+    1: 'Very light, almost no effort',
+    2: 'Light',
+    3: 'Easy, you can talk freely',
+    4: 'Moderate',
+    5: 'Somewhat hard',
+    6: 'Hard, short sentences only',
+    7: 'Very hard',
+    8: 'Very, very hard',
+    9: 'Almost all-out',
+    10: 'All-out, nothing left',
+  };
+
+  /// Sets or clears the effort (RPE) of a workout. The source stays as it
+  /// is, so later imports still update the other numbers.
+  Future<void> _editRpe() async {
+    final w = _w!;
+    var v = w.metrics['rpe'] ?? 6.0;
+    final result = await showDialog<double?>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setS) => AlertDialog(
+          title: const Text('How hard was it? (RPE)'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(rawNum(v), style: Theme.of(context).textTheme.displaySmall),
+              Text(_rpeWords[v.round().clamp(1, 10)] ?? ''),
+              Slider(
+                value: v,
+                min: 1,
+                max: 10,
+                divisions: 18,
+                label: rawNum(v),
+                onChanged: (x) => setS(() => v = x),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel')),
+            if (w.metrics.containsKey('rpe'))
+              TextButton(
+                  onPressed: () => Navigator.pop(context, -1.0),
+                  child: const Text('Remove')),
+            TextButton(
+                onPressed: () => Navigator.pop(context, v),
+                child: const Text('Save')),
+          ],
+        ),
+      ),
+    );
+    if (result == null) return;
+    final m = Map<String, double>.from(w.metrics);
+    if (result < 0) {
+      m.remove('rpe');
+    } else {
+      m['rpe'] = result;
+    }
+    AppDb.instance.saveWorkout(w.copyWith(metrics: m));
+    _load();
+  }
+
+  Widget _effortCard(Workout w) {
+    final rpe = w.metrics['rpe'];
+    return Card(
+      child: ListTile(
+        leading: const Icon(Icons.speed),
+        title: Text(rpe == null ? 'Effort (RPE): not set' : 'Effort (RPE): ${rawNum(rpe)} / 10'),
+        subtitle: Text(rpe == null
+            ? 'Add how hard this felt, so it shows up in your statistics.'
+            : (_rpeWords[rpe.round().clamp(1, 10)] ?? '')),
+        trailing: TextButton(
+            onPressed: _editRpe, child: Text(rpe == null ? 'Add' : 'Change')),
+      ),
+    );
+  }
+
+  /// Laps with pace, heart rate, cadence and power, and a small chart.
+  Widget _lapsCard(Workout w, Cat cat) {
+    final laps = w.splits;
+    final hasDist = laps.every((l) => (l['d'] as num?) != null);
+    bool any(String k) => laps.any((l) => l[k] != null);
+    double? dist(Map l) => (l['d'] as num?)?.toDouble();
+    double secOf(Map l) => (l['s'] as num).toDouble();
+    final foot = cat == Cat.run || cat == Cat.walk || cat == Cat.hike;
+    final swim = cat == Cat.swim;
+    final bike = cat == Cat.cycle;
+
+    // speed in m/s, the basis for pace, speed and the chart
+    double? speed(Map l) {
+      final d = dist(l);
+      return (d == null || d <= 0) ? null : d / secOf(l);
+    }
+
+    String paceText(Map l) {
+      final sp = speed(l);
+      if (sp == null) return '-';
+      if (foot) return fmtPace(1000 / sp);
+      if (swim) return fmtPace(100 / sp);
+      if (bike) return fmt(sp * 3.6);
+      return '-';
+    }
+
+    final speeds = [for (final l in laps) if (speed(l) != null) speed(l)!];
+    final lines = <String>[];
+    if (hasDist && speeds.length >= 2 && (foot || swim || bike)) {
+      final fastest = speeds.reduce(math.max);
+      final slowest = speeds.reduce(math.min);
+      String t(double s) => foot
+          ? '${fmtPace(1000 / s)} /km'
+          : (swim ? '${fmtPace(100 / s)} /100 m' : '${fmt(s * 3.6)} km/h');
+      lines.add('Fastest lap ${t(fastest)}, slowest ${t(slowest)}.');
+      if (foot) {
+        // second half against first half, by time
+        final total = laps.fold<double>(0, (a, l) => a + secOf(l));
+        var acc = 0.0, d1 = 0.0, t1 = 0.0, d2 = 0.0, t2 = 0.0;
+        for (final l in laps) {
+          final d = dist(l) ?? 0;
+          if (acc + secOf(l) / 2 < total / 2) {
+            d1 += d;
+            t1 += secOf(l);
+          } else {
+            d2 += d;
+            t2 += secOf(l);
+          }
+          acc += secOf(l);
+        }
+        if (d1 > 100 && d2 > 100) {
+          final p1 = t1 / (d1 / 1000), p2 = t2 / (d2 / 1000);
+          final diff = (p2 - p1).round();
+          lines.add(diff.abs() < 3
+              ? 'Even pace: both halves at about ${fmtPace(p1)} /km.'
+              : (diff < 0
+                  ? 'Negative split: the second half was ${-diff} s/km faster.'
+                  : 'The second half was $diff s/km slower than the first.'));
+        }
+      }
+    }
+
+    final cols = <DataColumn>[
+      const DataColumn(label: Text('#')),
+      if (hasDist) DataColumn(label: Text(swim ? 'm' : 'km'), numeric: true),
+      const DataColumn(label: Text('Time'), numeric: true),
+      if (hasDist && (foot || swim || bike))
+        DataColumn(label: Text(foot ? '/km' : (swim ? '/100 m' : 'km/h')), numeric: true),
+      if (any('hr')) const DataColumn(label: Text('HR'), numeric: true),
+      if (any('cd')) const DataColumn(label: Text('Cad'), numeric: true),
+      if (any('pw')) const DataColumn(label: Text('W'), numeric: true),
+      if (any('up')) const DataColumn(label: Text('Up m'), numeric: true),
+    ];
+    final rows = [
+      for (final l in laps)
+        DataRow(cells: [
+          DataCell(Text('${l['i']}')),
+          if (hasDist)
+            DataCell(Text(swim
+                ? '${dist(l)!.round()}'
+                : fmt((dist(l) ?? 0) / 1000))),
+          DataCell(Text(_hms(secOf(l)))),
+          if (hasDist && (foot || swim || bike)) DataCell(Text(paceText(l))),
+          if (any('hr')) DataCell(Text(l['hr'] == null ? '-' : '${(l['hr'] as num).round()}')),
+          if (any('cd')) DataCell(Text(l['cd'] == null ? '-' : '${(l['cd'] as num).round()}')),
+          if (any('pw')) DataCell(Text(l['pw'] == null ? '-' : '${(l['pw'] as num).round()}')),
+          if (any('up')) DataCell(Text(l['up'] == null ? '-' : '${(l['up'] as num).round()}')),
+        ]),
+    ];
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (hasDist && speeds.length >= 2 && (foot || swim || bike)) ...[
+              SizedBox(
+                height: 90,
+                child: CustomPaint(
+                  painter: _LapPainter(speeds, Theme.of(context).colorScheme),
+                  size: Size.infinite,
+                ),
+              ),
+              const Text('Bar height = speed of each lap (higher is faster).',
+                  style: TextStyle(fontSize: 11)),
+              const SizedBox(height: 4),
+            ],
+            for (final t in lines) Text(t, style: const TextStyle(fontSize: 13)),
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: DataTable(columnSpacing: 18, columns: cols, rows: rows),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _delete() async {
@@ -209,9 +411,13 @@ class _WorkoutDetailScreenState extends State<WorkoutDetailScreen> {
     if (w.activeKcal != null) tiles.add(MapEntry('Calories', '${fmt(w.activeKcal!)} kcal'));
     final avgHr = w.metrics['avg_hr'];
     if (avgHr != null) tiles.add(MapEntry('Avg heart rate', '${avgHr.round()} bpm'));
+    final rpeV = w.metrics['rpe'];
+    if (rpeV != null) {
+      tiles.add(MapEntry(cat == Cat.strength ? 'Average RPE' : 'RPE', rawNum((rpeV * 10).round() / 10)));
+    }
 
     // the other numbers, in a useful order
-    final shown = <String>{'sets', 'reps', 'volume_kg', 'avg_hr'};
+    final shown = <String>{'sets', 'reps', 'volume_kg', 'avg_hr', 'rpe'};
     final keys = <String>[
       ...metricOrder(cat).where((k) => w.metrics.containsKey(k) && !shown.contains(k)),
       ...w.metrics.keys.where((k) =>
@@ -222,6 +428,19 @@ class _WorkoutDetailScreenState extends State<WorkoutDetailScreen> {
       appBar: AppBar(
         title: Text(workoutTitle(w)),
         actions: [
+          if (cat == Cat.strength)
+            IconButton(
+              icon: const Icon(Icons.playlist_add),
+              tooltip: 'Save as routine',
+              onPressed: () async {
+                final id = await saveRoutineDialog(context,
+                    suggestedName: w.title, exercises: w.exercises);
+                if (id != null && mounted) {
+                  ScaffoldMessenger.of(context)
+                      .showSnackBar(const SnackBar(content: Text('Routine saved.')));
+                }
+              },
+            ),
           if (cat == Cat.strength)
             IconButton(
               icon: const Icon(Icons.fitness_center),
@@ -264,6 +483,15 @@ class _WorkoutDetailScreenState extends State<WorkoutDetailScreen> {
             runSpacing: 12,
             children: [for (final t in tiles) _tile(t.key, t.value)],
           ),
+          if (cat != Cat.strength) ...[
+            const SizedBox(height: 12),
+            _effortCard(w),
+          ],
+          if (w.splits.length > 1) ...[
+            const SizedBox(height: 20),
+            Text('Laps', style: title),
+            _lapsCard(w, cat),
+          ],
           if (keys.isNotEmpty) ...[
             const SizedBox(height: 20),
             Text('More data', style: title),
@@ -306,6 +534,15 @@ class _WorkoutDetailScreenState extends State<WorkoutDetailScreen> {
                   style: const TextStyle(fontSize: 12)),
             const SizedBox(height: 16),
             _zonesCard(w),
+          ] else if (w.splits.any((l) => l['hr'] != null)) ...[
+            const SizedBox(height: 20),
+            Text('Heart rate', style: title),
+            const SizedBox(height: 8),
+            _zonesCard(w),
+            const Text(
+                'Worked out from the laps of the Garmin export (average heart rate of each '
+                'lap), so it is approximate.',
+                style: TextStyle(fontSize: 11)),
           ],
           if (w.exercises.isNotEmpty) ...[
             const SizedBox(height: 20),
@@ -330,20 +567,7 @@ class _WorkoutDetailScreenState extends State<WorkoutDetailScreen> {
 
   // minutes in each of five zones (50-60 %, ... 90-100 % of the maximum heart rate)
   List<double> _zoneMinutes(Workout w, double maxHr) {
-    final z = List<double>.filled(5, 0);
-    final n = w.hr.length;
-    if (n < 2) return z;
-    final gaps = [for (var i = 0; i < n - 1; i++) w.hr[i + 1][0] - w.hr[i][0]]..sort();
-    final typical = gaps[gaps.length ~/ 2];
-    for (var i = 0; i < n; i++) {
-      final dt = i < n - 1
-          ? (w.hr[i + 1][0] - w.hr[i][0]).clamp(0, typical * 3).toDouble()
-          : typical;
-      final f = w.hr[i][1] / maxHr;
-      final k = f >= 0.9 ? 4 : (f >= 0.8 ? 3 : (f >= 0.7 ? 2 : (f >= 0.6 ? 1 : (f >= 0.5 ? 0 : -1))));
-      if (k >= 0) z[k] += dt;
-    }
-    return z;
+    return zonesOf(w, maxHr).minutes; // the heart-rate series, or else the laps
   }
 
   Future<void> _setMaxHr() async {
@@ -452,6 +676,8 @@ class _WorkoutDetailScreenState extends State<WorkoutDetailScreen> {
       } else {
         text = 'set';
       }
+      final rpe = (s['rpe'] as num?)?.toDouble();
+      if (rpe != null && rpe > 0) text += '   RPE ${rawNum((rpe * 10).round() / 10)}';
       final isWarm = type == 'warmup';
       if (!isWarm) {
         n++;
@@ -481,6 +707,15 @@ class _WorkoutDetailScreenState extends State<WorkoutDetailScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(name, style: const TextStyle(fontWeight: FontWeight.w600)),
+            if (ex['ss'] != null)
+              Text('Superset',
+                  style: TextStyle(
+                      fontSize: 12,
+                      color: Theme.of(context).colorScheme.primary,
+                      fontWeight: FontWeight.w600)),
+            if ((ex['note'] ?? '').toString().isNotEmpty)
+              Text((ex['note']).toString(),
+                  style: const TextStyle(fontSize: 12, fontStyle: FontStyle.italic)),
             const SizedBox(height: 4),
             ...rows,
             if (best1rm != null)
@@ -555,4 +790,34 @@ class _HrPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+}
+
+/// Bars: the speed of each lap.
+class _LapPainter extends CustomPainter {
+  final List<double> speeds; // m/s
+  final ColorScheme cs;
+  _LapPainter(this.speeds, this.cs);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (speeds.isEmpty || size.width <= 0 || size.height <= 0) return;
+    final hi = speeds.reduce(math.max);
+    final lo = speeds.reduce(math.min);
+    final base = lo * 0.85; // the bars start a bit below the slowest lap
+    final span = hi - base;
+    final slot = size.width / speeds.length;
+    final bw = math.min(slot * 0.7, 40.0);
+    final paint = Paint()..color = cs.primary;
+    final fastest = Paint()..color = cs.tertiary;
+    for (var i = 0; i < speeds.length; i++) {
+      final f = span <= 0 ? 1.0 : (speeds[i] - base) / span;
+      final h = math.max(3.0, size.height * f);
+      final x = slot * i + (slot - bw) / 2;
+      canvas.drawRect(
+          Rect.fromLTWH(x, size.height - h, bw, h), speeds[i] == hi ? fastest : paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _LapPainter old) => old.speeds != speeds;
 }

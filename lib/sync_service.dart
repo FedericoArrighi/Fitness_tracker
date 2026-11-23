@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:isolate';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'db.dart';
@@ -59,15 +60,36 @@ class SyncService {
   }
 
   /// Sends local changes, receives remote ones. Never throws.
+  /// The work happens in a background isolate, so the screen stays smooth
+  /// even when a lot of data is exchanged.
   static Future<SyncResult> run() async {
     if (_running) return const SyncResult(0, 0, 'A sync is already running.');
+    _running = true;
+    try {
+      final path = AppDb.instance.path;
+      final r = await Isolate.run(() {
+        AppDb.initAt(path);
+        return _syncCore();
+      });
+      if (r.pulled > 0) {
+        AppDb.instance.invalidateWorkouts(); // the cache in this isolate is stale now
+        dataChanged.value++;
+      }
+      return r;
+    } catch (e) {
+      return SyncResult(0, 0, '$e');
+    } finally {
+      _running = false;
+    }
+  }
+
+  static Future<SyncResult> _syncCore() async {
     final db = AppDb.instance;
     final url = _baseUrl(db.getSetting('sync_url') ?? '');
     final token = db.getSetting('sync_token') ?? '';
     if (url.isEmpty || token.isEmpty) {
       return const SyncResult(0, 0, 'Sync is not set up yet.');
     }
-    _running = true;
     try {
       SyncStore.ensureTables();
       var client = db.getSetting('sync_client');
@@ -120,7 +142,6 @@ class SyncService {
       final applied = SyncStore.applyRemote(incoming);
       db.setSetting('sync_seq', '${data['seq']}');
       db.setSetting('sync_last', DateTime.now().toIso8601String());
-      if (applied > 0) dataChanged.value++;
       return SyncResult(
         send.length,
         applied,
@@ -132,8 +153,6 @@ class SyncService {
       );
     } catch (e) {
       return SyncResult(0, 0, '$e');
-    } finally {
-      _running = false;
     }
   }
 }

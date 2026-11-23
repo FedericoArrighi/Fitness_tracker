@@ -372,6 +372,7 @@ CsvParseResult parseHevyCsv(Uint8List bytes) {
   final iKm = idx(['distancekm']);
   final iMi = idx(['distancemiles']);
   final iSec = idx(['durationseconds']);
+  final iRpe = idx(['rpe']);
   if (iTitle == null || iStart == null || iEx == null) {
     return CsvParseResult([], [],
         error: 'This does not look like a Hevy export. Columns in the file: ${rows.first.join(', ')}');
@@ -409,6 +410,7 @@ CsvParseResult parseHevyCsv(Uint8List bytes) {
     var totalReps = 0.0;
     var volume = 0.0;
     var distKm = 0.0;
+    var rpeSum = 0.0, rpeN = 0;
     for (final row in gr) {
       final ex = _at(row, iEx).trim();
       if (ex.isEmpty) continue;
@@ -430,12 +432,14 @@ CsvParseResult parseHevyCsv(Uint8List bytes) {
         if (mi != null) km = mi * 1.609344;
       }
       final sec = _num(_at(row, iSec));
+      final rpe = _num(_at(row, iRpe));
       exData[ex]!.add({
         'type': st.isEmpty ? 'normal' : st,
         if (kg != null) 'kg': kg,
         if (reps != null) 'reps': reps,
         if (km != null) 'km': km,
         if (sec != null) 'sec': sec,
+        if (rpe != null && rpe > 0) 'rpe': rpe,
       });
       if (st == 'warmup') {
         warm[ex] = (warm[ex] ?? 0) + 1;
@@ -445,6 +449,10 @@ CsvParseResult parseHevyCsv(Uint8List bytes) {
       if (reps != null) totalReps += reps;
       if (kg != null && reps != null) volume += kg * reps;
       if (km != null) distKm += km;
+      if (rpe != null && rpe > 0) {
+        rpeSum += rpe;
+        rpeN++;
+      }
       String label;
       if (kg != null && kg > 0 && reps != null) {
         label = '${_w(kg)}×${reps.round()}';
@@ -457,6 +465,7 @@ CsvParseResult parseHevyCsv(Uint8List bytes) {
       } else {
         label = 'set';
       }
+      if (rpe != null && rpe > 0) label += ' @${_w(rpe)}';
       if (st == 'failure') {
         label += ' (F)';
       } else if (st == 'dropset') {
@@ -484,6 +493,7 @@ CsvParseResult parseHevyCsv(Uint8List bytes) {
         'sets': sets.toDouble(),
         'reps': totalReps,
         'volume_kg': volume,
+        if (rpeN > 0) 'rpe': rpeSum / rpeN,
       },
       exercises: [
         for (final ex in order) {'name': ex, 'sets': exData[ex]!}

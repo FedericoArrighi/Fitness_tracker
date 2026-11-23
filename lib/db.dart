@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -131,6 +132,15 @@ class DayTotals {
   final Set<String> incomplete = {};
 }
 
+/// Something you saved yourself: a gym routine ('gym_template'), a meal
+/// template ('meal_template') or a favourite food ('favorite_food').
+class UserItem {
+  final String id, kind;
+  final Map<String, dynamic> data;
+  final int updatedAt;
+  const UserItem(this.id, this.kind, this.data, this.updatedAt);
+}
+
 class Workout {
   final String id;
   final String day; // local date of the start, YYYY-MM-DD
@@ -150,6 +160,10 @@ class Workout {
   final List<List<double>> hr;
   /// Gym sessions: [{name, sets: [{type, kg, reps, km, sec}]}]
   final List<Map<String, dynamic>> exercises;
+
+  /// Laps / splits of a run, ride or swim (from the Garmin export):
+  /// [{i, d (m), s (s), hr, hm, cd, pw, up, dn, gc, st, vo}]
+  final List<Map<String, dynamic>> splits;
   final bool deleted;
 
   /// true when loaded without the heart rate series / exercises (fast lists).
@@ -171,6 +185,7 @@ class Workout {
     this.metrics = const {},
     this.hr = const [],
     this.exercises = const [],
+    this.splits = const [],
     this.deleted = false,
     this.light = false,
   });
@@ -189,6 +204,7 @@ class Workout {
     Map<String, double>? metrics,
     List<List<double>>? hr,
     List<Map<String, dynamic>>? exercises,
+    List<Map<String, dynamic>>? splits,
   }) =>
       Workout(
         id: id,
@@ -205,6 +221,7 @@ class Workout {
         metrics: metrics ?? this.metrics,
         hr: hr ?? this.hr,
         exercises: exercises ?? this.exercises,
+        splits: splits ?? this.splits,
         deleted: deleted,
         light: light,
       );
@@ -218,6 +235,7 @@ class Workout {
   /// heart rate series and exercises, each in its own column (large)
   String get hrJson => hr.isEmpty ? '' : jsonEncode(hr);
   String get exJson => exercises.isEmpty ? '' : jsonEncode(exercises);
+  String get splitsJson => splits.isEmpty ? '' : jsonEncode(splits);
 
   /// everything together, for comparing two versions of a workout
   String get extraJson => jsonEncode({
@@ -225,6 +243,7 @@ class Workout {
         if (metrics.isNotEmpty) 'm': metrics,
         if (hr.isNotEmpty) 'hr': hr,
         if (exercises.isNotEmpty) 'ex': exercises,
+        if (splits.isNotEmpty) 'sp': splits,
       });
 
   /// Same basic data (ignores notes and extras).
@@ -259,7 +278,32 @@ class AppDb {
 
   static Future<void> init() async {
     final dir = await getApplicationDocumentsDirectory();
-    initAt(p.join(dir.path, 'macro_tracker.db'));
+    final path = p.join(dir.path, 'macro_tracker.db');
+    _applyPendingRestore(path);
+    initAt(path);
+  }
+
+  /// A restore (see backup_service.dart) leaves a file next to the database;
+  /// it is swapped in here, before the database is opened.
+  static void _applyPendingRestore(String path) {
+    final restore = File('$path.restore');
+    if (!restore.existsSync()) return;
+    final keep = File('$path.replaced'); // the database that is being replaced
+    try {
+      if (keep.existsSync()) keep.deleteSync();
+      final old = File(path);
+      if (old.existsSync()) old.renameSync(keep.path);
+      for (final ext in ['-wal', '-shm']) {
+        final f = File('$path$ext');
+        if (f.existsSync()) f.deleteSync();
+      }
+      restore.renameSync(path);
+    } catch (_) {
+      // put the old database back if something went wrong
+      try {
+        if (!File(path).existsSync() && keep.existsSync()) keep.renameSync(path);
+      } catch (_) {}
+    }
   }
 
   /// Opens (and if needed creates) the database file. Also used by
@@ -269,6 +313,10 @@ class AppDb {
     // WAL: readers are not blocked while another connection writes.
     db.select('PRAGMA journal_mode = WAL');
     db.select('PRAGMA busy_timeout = 5000');
+    // Faster and still safe in WAL mode: no disk flush after every commit.
+    db.execute('PRAGMA synchronous = NORMAL');
+    db.execute('PRAGMA temp_store = MEMORY');
+    db.execute('PRAGMA cache_size = -16000');
     db.execute('''
       CREATE TABLE IF NOT EXISTS foods (
         id TEXT PRIMARY KEY,
@@ -331,6 +379,18 @@ class AppDb {
         deleted INTEGER NOT NULL DEFAULT 0
       );
     ''');
+    // ---- your own saved things: routines, meal templates, favourite foods ----
+    db.execute('''
+      CREATE TABLE IF NOT EXISTS user_items (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        data TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        deleted INTEGER NOT NULL DEFAULT 0
+      );
+    ''');
+    db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_user_items_kind ON user_items(kind, deleted)');
     // ---- Milestone 6: activity (steps, sleep, workouts, ...) ----
     db.execute('''
       CREATE TABLE IF NOT EXISTS daily_metrics (
@@ -365,6 +425,9 @@ class AppDb {
     }
     if (!wcols.any((c) => c['name'] == 'ex_json')) {
       db.execute("ALTER TABLE workouts ADD COLUMN ex_json TEXT NOT NULL DEFAULT ''");
+    }
+    if (!wcols.any((c) => c['name'] == 'splits_json')) {
+      db.execute("ALTER TABLE workouts ADD COLUMN splits_json TEXT NOT NULL DEFAULT ''");
     }
     // One time: move the big parts (heart rate series, exercises) out of "extra",
     // so that lists of workouts load fast.
@@ -446,6 +509,27 @@ class AppDb {
             'WHERE e.food_id = foods.id AND e.deleted = 0) DESC, '
             'name COLLATE NOCASE LIMIT $limit';
     final rs = _db.select(sql, [for (final w in words) '%$w%']);
+    return [
+      for (final r in rs)
+        Food(
+          id: r['id'] as String,
+          name: r['name'] as String,
+          values: _values(r['id'] as String),
+          isRecipe: r['recipe_id'] != null,
+        )
+    ];
+  }
+
+  /// The foods with these ids (for the favourites), by name.
+  List<Food> loadFoodsByIds(Iterable<String> ids, [bool includeRecipes = false]) {
+    final list = ids.toList();
+    if (list.isEmpty) return [];
+    final marks = List.filled(list.length, '?').join(', ');
+    final rs = _db.select(
+        'SELECT id, name, recipe_id FROM foods WHERE deleted = 0 AND id IN ($marks)' +
+            (includeRecipes ? '' : ' AND recipe_id IS NULL') +
+            ' ORDER BY name COLLATE NOCASE',
+        list);
     return [
       for (final r in rs)
         Food(
@@ -574,6 +658,57 @@ class AppDb {
   String? getSetting(String key) {
     final rs = _db.select('SELECT value FROM settings WHERE key = ?', [key]);
     return rs.isEmpty ? null : rs.first['value'] as String;
+  }
+
+  // ---------- routines, meal templates, favourites ----------
+
+  List<UserItem> loadItems(String kind) {
+    final rs = _db.select(
+        'SELECT id, kind, data, updated_at FROM user_items '
+        'WHERE kind = ? AND deleted = 0 ORDER BY updated_at DESC',
+        [kind]);
+    final out = <UserItem>[];
+    for (final r in rs) {
+      try {
+        out.add(UserItem(
+          r['id'] as String,
+          r['kind'] as String,
+          (jsonDecode(r['data'] as String) as Map).cast<String, dynamic>(),
+          r['updated_at'] as int,
+        ));
+      } catch (_) {
+        // a damaged item is skipped
+      }
+    }
+    return out;
+  }
+
+  void saveItem(String kind, String id, Map<String, dynamic> data) {
+    _db.execute(
+        'INSERT INTO user_items(id, kind, data, updated_at, deleted) '
+        'VALUES(?, ?, ?, ?, 0) ON CONFLICT(id) DO UPDATE SET '
+        'kind = excluded.kind, data = excluded.data, '
+        'updated_at = excluded.updated_at, deleted = 0',
+        [id, kind, jsonEncode(data), nowMs()]);
+  }
+
+  void deleteItem(String id) {
+    _db.execute('UPDATE user_items SET deleted = 1, updated_at = ? WHERE id = ?',
+        [nowMs(), id]);
+  }
+
+  /// The ids of the foods you marked as favourites.
+  Set<String> favoriteFoodIds() => {
+        for (final i in loadItems('favorite_food'))
+          if (i.data['food_id'] is String) i.data['food_id'] as String
+      };
+
+  void setFavorite(String foodId, bool favorite) {
+    if (favorite) {
+      saveItem('favorite_food', 'fav:$foodId', {'food_id': foodId});
+    } else {
+      deleteItem('fav:$foodId');
+    }
   }
 
   void setSetting(String key, String value) {
@@ -717,6 +852,7 @@ class AppDb {
 
   /// One weight per day; saving again for the same day replaces it.
   void saveWeight(String day, double kg, {String source = 'manual'}) {
+    stamp++;
     _db.execute(
         'INSERT INTO weights(day, kg, source, updated_at, deleted) '
         'VALUES(?, ?, ?, ?, 0) '
@@ -726,6 +862,7 @@ class AppDb {
   }
 
   void deleteWeight(String day) {
+    stamp++;
     _db.execute('UPDATE weights SET deleted = 1, updated_at = ? WHERE day = ?',
         [nowMs(), day]);
   }
@@ -808,6 +945,7 @@ class AppDb {
       }
       if (same) return false;
     }
+    stamp++;
     _db.execute(
         'INSERT INTO daily_metrics(day, data, source, updated_at) '
         'VALUES(?, ?, ?, ?) ON CONFLICT(day) DO UPDATE SET '
@@ -832,10 +970,16 @@ class AppDb {
   static const _wCols = 'id, day, start_ms, end_ms, type, title, distance_m, '
       'active_kcal, source, notes, extra, deleted';
 
-  Workout _workoutFromRow(Row r, {bool withHr = false, bool withEx = false}) {
+  Workout _workoutFromRow(Row r,
+      {bool withHr = false, bool withEx = false, bool withSplits = false}) {
     final core = parseExtra(r['extra']); // small
     Object? hrData;
     Object? exData;
+    Object? spData;
+    if (withSplits) {
+      final t = (r['splits_json'] as String?) ?? '';
+      spData = t.isNotEmpty ? jsonDecode(t) : null;
+    }
     if (withHr) {
       final t = (r['hr_json'] as String?) ?? '';
       hrData = t.isNotEmpty ? jsonDecode(t) : core['hr'];
@@ -870,8 +1014,12 @@ class AppDb {
         for (final e in ((exData as List?) ?? const []))
           (e as Map).cast<String, dynamic>()
       ],
+      splits: [
+        for (final e in ((spData as List?) ?? const []))
+          (e as Map).cast<String, dynamic>()
+      ],
       deleted: (r['deleted'] as int) == 1,
-      light: !(withHr && withEx),
+      light: !(withHr && withEx && withSplits),
     );
   }
 
@@ -883,7 +1031,14 @@ class AppDb {
 
   /// Call after workouts were changed by another connection (a background
   /// isolate, a sync).
-  void invalidateWorkouts() => _wVer++;
+  void invalidateWorkouts() {
+    _wVer++;
+    stamp++;
+  }
+
+  /// Goes up whenever data that several tabs show was changed. The main
+  /// screen uses it to reload a tab that was left in the background.
+  static int stamp = 0;
 
   /// All workouts, newest first. Cached: do not modify the returned list.
   /// With [withEx] the exercises of gym sessions are included.
@@ -924,7 +1079,8 @@ class AppDb {
   /// Any workout row, also a deleted one, with everything (heart rate, exercises).
   Workout? loadWorkout(String id) {
     final rs = _db.select('SELECT * FROM workouts WHERE id = ?', [id]);
-    return rs.isEmpty ? null : _workoutFromRow(rs.first, withHr: true, withEx: true);
+    return rs.isEmpty ? null : _workoutFromRow(rs.first,
+            withHr: true, withEx: true, withSplits: true);
   }
 
   /// Workouts from [fromDay] on, newest first. Without heart rate series;
@@ -959,10 +1115,11 @@ class AppDb {
           [...base, nowMs()]);
     } else {
       _db.execute(
-          '${head}hr_json, ex_json, updated_at, deleted) '
-          'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0) $common, '
-          'hr_json = excluded.hr_json, ex_json = excluded.ex_json',
-          [...base, w.hrJson, w.exJson, nowMs()]);
+          '${head}hr_json, ex_json, splits_json, updated_at, deleted) '
+          'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0) $common, '
+          'hr_json = excluded.hr_json, ex_json = excluded.ex_json, '
+          'splits_json = excluded.splits_json',
+          [...base, w.hrJson, w.exJson, w.splitsJson, nowMs()]);
     }
   }
 
@@ -981,6 +1138,7 @@ class AppDb {
         metrics: {...old.metrics, ...w.metrics},
         hr: w.hr.isNotEmpty ? w.hr : old.hr,
         exercises: w.exercises.isNotEmpty ? w.exercises : old.exercises,
+        splits: w.splits.isNotEmpty ? w.splits : old.splits,
       );
       if (old.sameAs(next) &&
           old.notes == next.notes &&
@@ -1033,6 +1191,7 @@ class AppDb {
       metrics: {...w.metrics, ...full.metrics},
       hr: full.hr.isNotEmpty ? full.hr : w.hr,
       exercises: full.exercises.isNotEmpty ? full.exercises : w.exercises,
+      splits: full.splits.isNotEmpty ? full.splits : w.splits,
     );
     if (merged.title == full.title &&
         merged.distanceM == full.distanceM &&

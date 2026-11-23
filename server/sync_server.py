@@ -32,6 +32,7 @@ ALLOWED_TABLES = {
     "targets",
     "daily_metrics",
     "workouts",
+    "user_items",
 }
 MAX_BODY = 200 * 1024 * 1024
 LOCK = threading.Lock()

@@ -59,7 +59,7 @@ class _Geo {
   double yOf(double v) => top + h * (1 - (v - y0) / (y1 - y0));
 }
 
-const _palette = [Color(0xFF2F6F5E), Color(0xFFD9822B), Color(0xFF5B6FD6), Color(0xFFC0392B)];
+const _palette = [Color(0xFF3FA68A), Color(0xFFD9822B), Color(0xFF5B6FD6), Color(0xFFC0392B)];
 
 /// Points over time, one or several series, with optional trend lines,
 /// and a tooltip on tap or hover.

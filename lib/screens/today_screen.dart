@@ -159,13 +159,13 @@ class _TodayScreenState extends State<TodayScreen> {
 
   // ---------- adding and removing ----------
 
-  Future<void> _add(String meal) async {
+  Future<void> _add(String meal, {bool favorites = false}) async {
     setState(() => _selected = meal);
     final food = await Navigator.push<Food>(
       context,
       MaterialPageRoute(
-          builder: (_) =>
-              const FoodsScreen(pickMode: true, includeRecipes: true)),
+          builder: (_) => FoodsScreen(
+              pickMode: true, includeRecipes: true, initialFavorites: favorites)),
     );
     if (food == null || !mounted) return;
     double? grams;
@@ -284,6 +284,182 @@ class _TodayScreenState extends State<TodayScreen> {
         added: ids, notify: true);
   }
 
+  /// Copies the meals of any day to the day on show.
+  Future<void> _copyFromDay() async {
+    final d = await showDatePicker(
+      context: context,
+      helpText: 'Copy the meals of which day?',
+      initialDate: DateTime(_date.year, _date.month, _date.day - 1),
+      firstDate: DateTime(2020),
+      lastDate: DateTime(2100),
+    );
+    if (d == null) return;
+    final items = AppDb.instance.loadDay(dayKey(d));
+    if (items.isEmpty) {
+      _snack('Nothing was logged on ${d.day}.${d.month}.${d.year}.');
+      return;
+    }
+    final day = dayKey(_date);
+    final ids = [
+      for (final e in items) AppDb.instance.addEntry(day, e.meal, e.foodId, e.grams)
+    ];
+    _record('Copied ${ids.length} item(s) from ${d.day}.${d.month}.${d.year}',
+        added: ids, notify: true);
+  }
+
+  // ---------- meal templates and favourites ----------
+
+  Future<String?> _askMeal() => showDialog<String>(
+        context: context,
+        builder: (context) => SimpleDialog(
+          title: const Text('Which meal?'),
+          children: [
+            for (final m in meals)
+              SimpleDialogOption(
+                onPressed: () => Navigator.pop(context, m),
+                child: Text(m),
+              ),
+          ],
+        ),
+      );
+
+  Future<void> _saveMealTemplate(String meal) async {
+    final es = _entries.where((e) => e.meal == meal).toList();
+    if (es.isEmpty) {
+      _snack('$meal is empty, nothing to save.');
+      return;
+    }
+    final c = TextEditingController(text: meal);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Save as meal template'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: c,
+              autofocus: true,
+              decoration: const InputDecoration(
+                labelText: 'Template name',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text('${es.length} item(s) with their amounts.',
+                style: const TextStyle(fontSize: 12)),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('Save')),
+        ],
+      ),
+    );
+    final name = c.text.trim();
+    if (ok != true || name.isEmpty) return;
+    AppDb.instance.saveItem('meal_template', newId(), {
+      'name': name,
+      'meal': meal,
+      'items': [
+        for (final e in es) {'food_id': e.foodId, 'grams': e.grams}
+      ],
+    });
+    _snack('Saved the template "$name".');
+  }
+
+  double _templateKcal(UserItem t) {
+    var kcal = 0.0;
+    for (final it in ((t.data['items'] as List?) ?? const [])) {
+      final m = (it as Map).cast<String, dynamic>();
+      final food = AppDb.instance.loadFood((m['food_id'] ?? '').toString());
+      final g = (m['grams'] as num?)?.toDouble() ?? 0;
+      kcal += (food?.values['calories'] ?? 0) * g / 100;
+    }
+    return kcal;
+  }
+
+  Future<UserItem?> _pickTemplate() async {
+    var items = AppDb.instance.loadItems('meal_template');
+    if (items.isEmpty) {
+      _snack('No meal templates yet. Open the menu of a meal and choose "Save as template".');
+      return null;
+    }
+    return showDialog<UserItem>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setS) => SimpleDialog(
+          title: const Text('Meal templates'),
+          children: [
+            if (items.isEmpty)
+              const Padding(
+                padding: EdgeInsets.all(24),
+                child: Text('No templates left.'),
+              ),
+            for (final t in items)
+              ListTile(
+                title: Text((t.data['name'] ?? '').toString()),
+                subtitle: Text(
+                    '${((t.data['items'] as List?) ?? const []).length} item(s), '
+                    '${fmt(_templateKcal(t))} kcal'),
+                onTap: () => Navigator.pop(context, t),
+                trailing: IconButton(
+                  icon: const Icon(Icons.delete_outline),
+                  tooltip: 'Delete the template',
+                  onPressed: () {
+                    AppDb.instance.deleteItem(t.id);
+                    setS(() => items = AppDb.instance.loadItems('meal_template'));
+                  },
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _applyTemplate(UserItem t, String meal) {
+    final day = dayKey(_date);
+    final ids = <String>[];
+    for (final it in ((t.data['items'] as List?) ?? const [])) {
+      final m = (it as Map).cast<String, dynamic>();
+      final fid = (m['food_id'] ?? '').toString();
+      final g = (m['grams'] as num?)?.toDouble() ?? 0;
+      if (fid.isEmpty || g <= 0 || AppDb.instance.loadFood(fid) == null) continue;
+      ids.add(AppDb.instance.addEntry(day, meal, fid, g));
+    }
+    if (ids.isEmpty) {
+      _snack('Nothing could be added: the foods of this template no longer exist.');
+      return;
+    }
+    _record('Added ${t.data['name']} to $meal', added: ids, notify: true);
+  }
+
+  Future<void> _addTemplateTo(String meal) async {
+    final t = await _pickTemplate();
+    if (t != null && mounted) _applyTemplate(t, meal);
+  }
+
+  /// From the quick bar: the template goes into the meal it was saved from.
+  Future<void> _quickTemplate() async {
+    final t = await _pickTemplate();
+    if (t == null || !mounted) return;
+    var meal = (t.data['meal'] ?? '').toString();
+    if (!meals.contains(meal)) {
+      final asked = await _askMeal();
+      if (asked == null) return;
+      meal = asked;
+    }
+    _applyTemplate(t, meal);
+  }
+
+  Future<void> _quickFavorites() async {
+    final meal = _selected ?? await _askMeal();
+    if (meal == null || !mounted) return;
+    await _add(meal, favorites: true);
+  }
+
   // ---------- keyboard shortcuts ----------
 
   void _copySelected() =>
@@ -353,6 +529,8 @@ class _TodayScreenState extends State<TodayScreen> {
                     if (v == 'copy') _copyMeal(meal);
                     if (v == 'cut') _cutMeal(meal);
                     if (v == 'paste') _pasteInto(meal);
+                    if (v == 'savetpl') _saveMealTemplate(meal);
+                    if (v == 'addtpl') _addTemplateTo(meal);
                   },
                   itemBuilder: (_) => [
                     PopupMenuItem(
@@ -369,6 +547,12 @@ class _TodayScreenState extends State<TodayScreen> {
                         child: Text(_clip.isEmpty
                             ? 'Paste'
                             : 'Paste $_clipLabel (${_clip.length} items)')),
+                    PopupMenuItem(
+                        value: 'savetpl',
+                        enabled: es.isNotEmpty,
+                        child: const Text('Save as template...')),
+                    const PopupMenuItem(
+                        value: 'addtpl', child: Text('Add a template...')),
                   ],
                 ),
                 IconButton(
@@ -459,6 +643,7 @@ class _TodayScreenState extends State<TodayScreen> {
                   if (v == 'copyday') _copyDay();
                   if (v == 'pasteday') _pasteDay();
                   if (v == 'yesterday') _copyYesterday();
+                  if (v == 'copyfrom') _copyFromDay();
                   if (v == 'undo') _undo();
                   if (v == 'redo') _redo();
                 },
@@ -482,6 +667,8 @@ class _TodayScreenState extends State<TodayScreen> {
                   const PopupMenuItem(
                       value: 'yesterday',
                       child: Text("Copy the day before's meals here")),
+                  const PopupMenuItem(
+                      value: 'copyfrom', child: Text('Copy the meals of another day...')),
                 ],
               ),
             ],
@@ -497,6 +684,37 @@ class _TodayScreenState extends State<TodayScreen> {
                     'Del clear, Ctrl+Z undo, Ctrl+Y redo, Esc deselect. '
                     'With no meal selected, Ctrl+C copies the whole day.',
                     style: TextStyle(fontSize: 12)),
+              ),
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: Wrap(
+                    spacing: 8,
+                    runSpacing: 0,
+                    children: [
+                      ActionChip(
+                        avatar: const Icon(Icons.content_copy, size: 18),
+                        label: const Text('Copy yesterday'),
+                        onPressed: _copyYesterday,
+                      ),
+                      ActionChip(
+                        avatar: const Icon(Icons.event, size: 18),
+                        label: const Text('Copy from a day...'),
+                        onPressed: _copyFromDay,
+                      ),
+                      ActionChip(
+                        avatar: const Icon(Icons.bookmark_border, size: 18),
+                        label: const Text('Meal templates'),
+                        onPressed: _quickTemplate,
+                      ),
+                      ActionChip(
+                        avatar: const Icon(Icons.star_border, size: 18),
+                        label: const Text('Favourites'),
+                        onPressed: _quickFavorites,
+                      ),
+                    ],
+                  ),
+                ),
               ),
               Card(
                 child: Padding(

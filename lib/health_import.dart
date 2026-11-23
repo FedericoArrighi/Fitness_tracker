@@ -101,7 +101,13 @@ class HealthImport {
   /// Returns the number of changes.
   static Future<int> autoImport() async {
     if (!supported || AppDb.instance.getSetting('hc_enabled') != '1') return 0;
-    final r = await _run(days: 14, request: false);
+    // Reading 14 days of Health Connect data is slow, so that is done twice a
+    // day; in between only the last 3 days are read.
+    final db = AppDb.instance;
+    final last = int.tryParse(db.getSetting('hc_last_full') ?? '') ?? 0;
+    final full = nowMs() - last > 12 * 3600 * 1000;
+    final r = await _run(days: full ? 14 : 3, request: false);
+    if (full) db.setSetting('hc_last_full', '${nowMs()}');
     return r.total;
   }
 
@@ -188,6 +194,9 @@ class HealthImport {
 
     final workouts = <Workout>[];
     var oddWorkouts = 0;
+    // sleep records per night and stage as [from, to] in ms. Garmin can write
+    // the same night more than once; overlapping records are counted once.
+    final sleepIv = <String, Map<String, List<List<int>>>>{};
 
     void process(HealthDataType type, List<HealthDataPoint> points) {
       points.sort((a, b) => a.dateFrom.compareTo(b.dateFrom));
@@ -242,7 +251,12 @@ class HealthImport {
             HealthDataType.SLEEP_ASLEEP: 'sleep_unspecified',
             HealthDataType.SLEEP_SESSION: 'sleep_session',
           }[type];
-          if (key != null && minutes > 0) add(sleepDay(p.dateFrom.toLocal()), key, minutes);
+          if (key != null && minutes > 0) {
+            sleepIv
+                .putIfAbsent(sleepDay(p.dateFrom.toLocal()), () => {})
+                .putIfAbsent(key, () => [])
+                .add([p.dateFrom.millisecondsSinceEpoch, p.dateTo.millisecondsSinceEpoch]);
+          }
         }
       }
     }
@@ -276,21 +290,44 @@ class HealthImport {
       d0 = d1;
     }
 
-    // sleep total = all sleeping stages
-    for (final m in agg.values) {
-      final unspecified = m.remove('sleep_unspecified') ?? 0;
-      final session = m.remove('sleep_session'); // whole night, incl. awake
-      if (m.containsKey('sleep_deep') ||
-          m.containsKey('sleep_light') ||
-          m.containsKey('sleep_rem') ||
-          unspecified > 0) {
-        m['sleep_total'] = (m['sleep_deep'] ?? 0) +
-            (m['sleep_light'] ?? 0) +
-            (m['sleep_rem'] ?? 0) +
-            unspecified;
-      } else if (session != null && session > 0) {
+    // minutes covered by a set of [from, to] intervals (overlaps count once)
+    double unionMin(List<List<int>> iv) {
+      final sorted = [...iv]..sort((x, y) => x[0].compareTo(y[0]));
+      var total = 0;
+      var curS = -1, curE = -1;
+      for (final r in sorted) {
+        if (curE < 0 || r[0] > curE) {
+          if (curE >= 0) total += curE - curS;
+          curS = r[0];
+          curE = r[1];
+        } else if (r[1] > curE) {
+          curE = r[1];
+        }
+      }
+      if (curE >= 0) total += curE - curS;
+      return total / 60000.0;
+    }
+
+    // sleep total = all sleeping stages together, each minute counted once
+    for (final e in sleepIv.entries) {
+      final m = agg.putIfAbsent(e.key, () => {});
+      final asleep = <List<int>>[];
+      double? session;
+      for (final kv in e.value.entries) {
+        final mins = unionMin(kv.value);
+        if (kv.key == 'sleep_session') {
+          session = mins; // whole night, incl. awake
+          continue;
+        }
+        if (kv.key != 'sleep_unspecified') m[kv.key] = mins;
+        if (kv.key != 'sleep_awake') asleep.addAll(kv.value);
+      }
+      final sess = session;
+      if (asleep.isNotEmpty) {
+        m['sleep_total'] = unionMin(asleep);
+      } else if (sess != null && sess > 0) {
         // no stages recorded: use the length of the session
-        m['sleep_total'] = session;
+        m['sleep_total'] = sess;
       }
     }
 
@@ -329,7 +366,10 @@ class HealthImport {
         if (e.key.compareTo(firstKey) < 0 || e.key.compareTo(endKey) >= 0) continue;
         if (e.value.isEmpty) continue;
         hadData = true;
-        if (db.saveDailyMetrics(e.key, e.value)) dayChanges++;
+        // keep values of the same day that came from elsewhere (Garmin export)
+        final old = db.loadDailyMetrics(e.key, e.key)[e.key];
+        final merged = old == null ? e.value : {...old, ...e.value};
+        if (db.saveDailyMetrics(e.key, merged)) dayChanges++;
       }
       for (final w in prepared) {
         hadData = true;

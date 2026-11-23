@@ -50,6 +50,7 @@ class SyncStore {
     'targets',
     'daily_metrics',
     'workouts',
+    'user_items',
   };
 
   // ------------------------------------------------------------------
@@ -147,10 +148,26 @@ class SyncStore {
       }));
     }
 
+    // routines, meal templates and favourite foods
+    for (final r in _db.select(
+        'SELECT i.id, i.kind, i.data, i.updated_at, i.deleted FROM user_items i '
+        "LEFT JOIN sync_meta m ON m.tbl = 'user_items' AND m.id = i.id "
+        'WHERE m.pushed_at IS NULL OR i.updated_at > m.pushed_at')) {
+      Object? data;
+      try {
+        data = jsonDecode(r['data'] as String);
+      } catch (_) {
+        continue;
+      }
+      out.add(SyncRecord('user_items', r['id'] as String, r['updated_at'] as int,
+          (r['deleted'] as int) == 1, {'kind': r['kind'], 'data': data}));
+    }
+
     // workouts
     for (final r in _db.select(
         'SELECT w.id, w.day, w.start_ms, w.end_ms, w.type, w.title, '
         'w.distance_m, w.active_kcal, w.source, w.notes, w.extra, w.hr_json, w.ex_json, '
+        'w.splits_json, '
         'w.updated_at, w.deleted '
         'FROM workouts w '
         "LEFT JOIN sync_meta m ON m.tbl = 'workouts' AND m.id = w.id "
@@ -195,6 +212,8 @@ class SyncStore {
     final ex = (r['ex_json'] as String?) ?? '';
     if (hr.isNotEmpty) m['hr'] = jsonDecode(hr);
     if (ex.isNotEmpty) m['ex'] = jsonDecode(ex);
+    final sp = (r['splits_json'] as String?) ?? '';
+    if (sp.isNotEmpty) m['sp'] = jsonDecode(sp);
     return m;
   }
 
@@ -262,6 +281,9 @@ class SyncStore {
         break;
       case 'workouts':
         sql = 'SELECT updated_at FROM workouts WHERE id = ?';
+        break;
+      case 'user_items':
+        sql = 'SELECT updated_at FROM user_items WHERE id = ?';
         break;
       case 'targets':
         return int.tryParse(
@@ -342,28 +364,36 @@ class SyncStore {
           'updated_at = excluded.updated_at',
           [r.id, jsonEncode(d['metrics'] ?? {}),
             d['source'] ?? 'health_connect', r.updatedAt]);
+    } else if (r.tbl == 'user_items') {
+      _db.execute(
+          'INSERT INTO user_items(id, kind, data, updated_at, deleted) '
+          'VALUES(?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET '
+          'kind = excluded.kind, data = excluded.data, '
+          'updated_at = excluded.updated_at, deleted = excluded.deleted',
+          [r.id, d['kind'] ?? '', jsonEncode(d['data'] ?? {}), r.updatedAt, del]);
     } else if (r.tbl == 'workouts') {
       final extra = Map<String, dynamic>.from((d['extra'] as Map?) ?? {});
       final hr = extra.remove('hr');
       final ex = extra.remove('ex');
+      final sp = extra.remove('sp');
       _db.execute(
           'INSERT INTO workouts(id, day, start_ms, end_ms, type, title, '
           'distance_m, active_kcal, source, notes, extra, hr_json, ex_json, '
-          'updated_at, deleted) '
-          'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
+          'splits_json, updated_at, deleted) '
+          'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
           'ON CONFLICT(id) DO UPDATE SET day = excluded.day, '
           'start_ms = excluded.start_ms, end_ms = excluded.end_ms, '
           'type = excluded.type, title = excluded.title, '
           'distance_m = excluded.distance_m, active_kcal = excluded.active_kcal, '
           'source = excluded.source, notes = excluded.notes, '
           'extra = excluded.extra, hr_json = excluded.hr_json, '
-          'ex_json = excluded.ex_json, '
+          'ex_json = excluded.ex_json, splits_json = excluded.splits_json, '
           'updated_at = excluded.updated_at, deleted = excluded.deleted',
           [r.id, d['day'], d['start_ms'], d['end_ms'], d['type'],
             d['title'] ?? '', d['distance_m'], d['active_kcal'],
             d['source'] ?? 'manual', d['notes'] ?? '', jsonEncode(extra),
             hr == null ? '' : jsonEncode(hr), ex == null ? '' : jsonEncode(ex),
-            r.updatedAt, del]);
+            sp == null ? '' : jsonEncode(sp), r.updatedAt, del]);
     } else if (r.tbl == 'targets') {
       _db.execute('DELETE FROM targets');
       final t = (d['targets'] as Map?)?.cast<String, dynamic>() ?? {};
