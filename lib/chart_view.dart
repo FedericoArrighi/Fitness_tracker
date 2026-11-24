@@ -188,7 +188,6 @@ class _MetricChartState extends State<MetricChart> {
   // The position under the finger or mouse. Only the chart itself is redrawn
   // when it changes, not the whole widget (this was slow on a desktop).
   final ValueNotifier<int?> _hoverN = ValueNotifier<int?>(null);
-  int? get _hover => _hoverN.value;
   set _hover(int? v) => _hoverN.value = v;
 
   @override

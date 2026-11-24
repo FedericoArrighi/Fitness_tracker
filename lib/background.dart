@@ -63,9 +63,11 @@ class GarminImportCounts {
   const GarminImportCounts(this.workouts, this.daysAdded, this.daysFilled);
 }
 
-/// Stores workouts and daily numbers of a Garmin export. For a day that
-/// already has data (e.g. from Health Connect), only keys that are still
-/// missing are added; existing values are never overwritten.
+/// Stores workouts and daily numbers of a Garmin export. The export wins:
+/// for a day that already has data (e.g. from Health Connect), every number
+/// the export has replaces the old one (sleep is replaced as a whole night),
+/// and numbers only the old data has are kept. Such a day is marked as coming
+/// from the export, so a later Health Connect import only fills gaps.
 Future<GarminImportCounts> importGarminExportInBackground(
     List<Workout> workouts, Map<String, Map<String, double>> days,
     {List<List<double>> kcalFixes = const []}) {
@@ -109,15 +111,19 @@ Future<GarminImportCounts> importGarminExportInBackground(
         if (old == null) {
           if (db.saveDailyMetrics(day, m, source: 'garmin_export')) daysAdded++;
         } else {
-          final src = sources[day] ?? 'health_connect';
+          // The Garmin export wins over Health Connect for every number it
+          // has. Numbers it does not have (e.g. body fat) are kept.
           final base = Map<String, double>.from(old);
-          // impossible sleep (over 14 h) is dropped and replaced by the export
+          // sleep is never mixed: the night comes completely from the export
+          if (m.containsKey('sleep_total')) {
+            base.removeWhere((k, v) => k.startsWith('sleep_'));
+          }
+          // impossible sleep (over 14 h) is dropped
           if ((base['sleep_total'] ?? 0) > 840) {
             base.removeWhere((k, v) => k.startsWith('sleep_'));
           }
-          // days made by this importer are refreshed, others only completed
-          final next = src == 'garmin_export' ? {...base, ...m} : {...m, ...base};
-          if (db.saveDailyMetrics(day, next, source: src)) daysFilled++;
+          final next = {...base, ...m};
+          if (db.saveDailyMetrics(day, next, source: 'garmin_export')) daysFilled++;
         }
       });
       // days with impossible sleep that the export does not cover: drop it

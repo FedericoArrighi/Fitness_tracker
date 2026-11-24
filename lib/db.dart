@@ -929,11 +929,13 @@ class AppDb {
   /// if nothing changed, so unchanged days are not synced again.
   bool saveDailyMetrics(String day, Map<String, double> m,
       {String source = 'health_connect'}) {
-    final rs = _db.select('SELECT data FROM daily_metrics WHERE day = ?', [day]);
+    final rs = _db.select(
+        'SELECT data, source FROM daily_metrics WHERE day = ?', [day]);
     if (rs.isNotEmpty) {
       final old = (jsonDecode(rs.first['data'] as String) as Map)
           .map((k, v) => MapEntry(k as String, (v as num).toDouble()));
-      var same = old.length == m.length;
+      // a changed source counts as a change (Garmin must stay Garmin)
+      var same = old.length == m.length && rs.first['source'] == source;
       if (same) {
         for (final e in m.entries) {
           final o = old[e.key];

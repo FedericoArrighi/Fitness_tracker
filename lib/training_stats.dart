@@ -214,9 +214,9 @@ List<MapEntry<String, String>> raceEstimates(List<Workout> all, DateTime today) 
       final km = w.distanceM! / 1000;
       final secs = w.metrics['moving_s'] ?? w.minutes * 60;
       final t = (secs * math.pow(d / km, 1.06)).toDouble();
-      if (bestT == null || t < bestT!) bestT = t;
+      if (bestT == null || t < bestT) bestT = t;
     }
-    if (bestT != null) out.add(MapEntry(name, _hms(bestT!)));
+    if (bestT != null) out.add(MapEntry(name, _hms(bestT)));
   });
   return out;
 }

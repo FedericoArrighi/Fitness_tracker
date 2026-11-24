@@ -4,7 +4,6 @@ import '../db.dart';
 import '../metrics.dart';
 import '../nutrients.dart';
 import '../training_stats.dart';
-import '../workout_format.dart';
 import '../workout_types.dart';
 import 'analysis_screen.dart';
 import 'exercise_progress_screen.dart';

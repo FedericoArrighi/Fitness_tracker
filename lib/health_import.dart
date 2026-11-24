@@ -366,10 +366,30 @@ class HealthImport {
         if (e.key.compareTo(firstKey) < 0 || e.key.compareTo(endKey) >= 0) continue;
         if (e.value.isEmpty) continue;
         hadData = true;
-        // keep values of the same day that came from elsewhere (Garmin export)
+        // The Garmin export wins: a day that came from the export keeps its
+        // values and Health Connect only adds what is still missing.
         final old = db.loadDailyMetrics(e.key, e.key)[e.key];
-        final merged = old == null ? e.value : {...old, ...e.value};
-        if (db.saveDailyMetrics(e.key, merged)) dayChanges++;
+        final srcRows = db.raw
+            .select('SELECT source FROM daily_metrics WHERE day = ?', [e.key]);
+        final fromGarmin =
+            srcRows.isNotEmpty && srcRows.first['source'] == 'garmin_export';
+        Map<String, double> merged;
+        if (old == null) {
+          merged = e.value;
+        } else if (fromGarmin) {
+          final extra = Map<String, double>.from(e.value);
+          // sleep is never mixed: if the export has this night, ignore ours
+          if (old.containsKey('sleep_total')) {
+            extra.removeWhere((k, v) => k.startsWith('sleep_'));
+          }
+          merged = {...extra, ...old};
+        } else {
+          merged = {...old, ...e.value};
+        }
+        if (db.saveDailyMetrics(e.key, merged,
+            source: fromGarmin ? 'garmin_export' : 'health_connect')) {
+          dayChanges++;
+        }
       }
       for (final w in prepared) {
         hadData = true;

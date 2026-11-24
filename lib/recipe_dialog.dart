@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'db.dart';
 import 'nutrients.dart';
-import 'widgets.dart';
 
 /// What the user chose: an amount (always converted to grams of the finished
 /// dish) and, if asked for, a meal and a day.

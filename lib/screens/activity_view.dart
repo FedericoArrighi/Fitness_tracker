@@ -2,15 +2,11 @@ import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import '../background.dart';
-import '../csv_import.dart';
-import '../garmin_export.dart';
 import '../db.dart';
 import '../health_import.dart';
 import '../hevy_api.dart';
 import '../nutrients.dart';
-import '../widgets.dart';
 import '../workout_format.dart';
-import '../workout_types.dart';
 
 /// Imports (Health Connect, Garmin CSV, Hevy CSV) and the list of workouts.
 class ActivityPanel extends StatefulWidget {
@@ -347,7 +343,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
       _status = 'Workouts: ${c.workouts.added} new, ${c.workouts.updated} updated, '
           '${c.workouts.merged} merged with sessions from another source, '
           '${c.workouts.unchanged} already present. '
-          'Days: ${c.daysAdded} new, ${c.daysFilled} completed with missing values.';
+          'Days: ${c.daysAdded} new, ${c.daysFilled} updated (Garmin values replace Health Connect ones).';
     });
     widget.onChanged();
   }
