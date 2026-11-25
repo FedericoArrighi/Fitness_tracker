@@ -6,6 +6,7 @@ import '../nutrients.dart';
 import '../training_stats.dart';
 import '../workout_types.dart';
 import 'analysis_screen.dart';
+import 'exercise_picker.dart';
 import 'exercise_progress_screen.dart';
 import 'gym_workout_screen.dart';
 import 'lift_tools_screen.dart';
@@ -322,6 +323,18 @@ class _TrainingViewState extends State<TrainingView> {
             onTap: () => Navigator.push(
               context,
               MaterialPageRoute(builder: (_) => const LiftToolsScreen()),
+            ),
+          ),
+        ),
+        Card(
+          child: ListTile(
+            leading: const Icon(Icons.fitness_center),
+            title: const Text('Exercise library'),
+            subtitle: const Text('Search exercises, create your own'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const ExerciseLibraryScreen()),
             ),
           ),
         ),

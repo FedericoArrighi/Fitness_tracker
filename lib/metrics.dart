@@ -203,7 +203,7 @@ DailyData loadDailyData(MetricDef m, DateTime from, DateTime to) {
   return DailyData(values, partial);
 }
 
-/// 'minutes' or 'cat:<category|all>:<what>' -> value per day.
+/// `minutes` or `cat:<category|all>:<what>` -> value per day.
 Map<String, double> _workoutValues(String key, String f, String t) {
   final ws = AppDb.instance
       .loadAllWorkouts()
@@ -318,7 +318,7 @@ Map<String, double> _workoutValues(String key, String f, String t) {
   return out;
 }
 
-/// '<kind>|<exercise name>' -> value per day (kind: 1rm, maxkg, volume, reps).
+/// `<kind>|<exercise name>` -> value per day (kind: 1rm, maxkg, volume, reps).
 Map<String, double> _exerciseValues(String key, String f, String t) {
   final i = key.indexOf('|');
   final kind = key.substring(0, i);

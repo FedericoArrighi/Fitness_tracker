@@ -100,10 +100,10 @@ class HevySync {
         final sec = _d(s['duration_seconds']);
         setObjs.add({
           'type': st,
-          if (kg != null) 'kg': kg,
-          if (reps != null) 'reps': reps,
+          'kg': ?kg,
+          'reps': ?reps,
           if (dist != null) 'km': dist / 1000,
-          if (sec != null) 'sec': sec,
+          'sec': ?sec,
         });
         if (st == 'warmup') {
           warm++;

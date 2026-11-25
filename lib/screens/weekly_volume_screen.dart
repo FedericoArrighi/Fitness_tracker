@@ -147,7 +147,7 @@ _Stats? _computeStats(List<_Week> complete, _Metric m, bool run) {
   final all = [for (final w in complete) m.value(w)];
   s.last = all.last;
   if (all.length >= 5) {
-    final prev = [for (final v in all.sublist(all.length - 5, all.length - 1)) if (v != null) v];
+    final prev = [for (final v in all.sublist(all.length - 5, all.length - 1)) ?v];
     if (prev.isNotEmpty) {
       s.prev4 = prev.reduce((a, b) => a + b) / prev.length;
       if (s.last != null && s.prev4! > 0) s.ratio = s.last! / s.prev4!;
@@ -155,8 +155,8 @@ _Stats? _computeStats(List<_Week> complete, _Metric m, bool run) {
   }
   // last 4 weeks against the 4 weeks before those
   if (all.length >= 8) {
-    final a = [for (final v in all.sublist(all.length - 4)) if (v != null) v];
-    final b = [for (final v in all.sublist(all.length - 8, all.length - 4)) if (v != null) v];
+    final a = [for (final v in all.sublist(all.length - 4)) ?v];
+    final b = [for (final v in all.sublist(all.length - 8, all.length - 4)) ?v];
     if (a.isNotEmpty && b.isNotEmpty) {
       final ma = a.reduce((x, y) => x + y) / a.length;
       final mb = b.reduce((x, y) => x + y) / b.length;

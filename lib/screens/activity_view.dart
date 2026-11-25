@@ -3,9 +3,12 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import '../background.dart';
 import '../db.dart';
+import '../garmin_connect.dart';
+import '../garmin_export.dart';
 import '../health_import.dart';
 import '../hevy_api.dart';
 import '../nutrients.dart';
+import '../sync_service.dart';
 import '../workout_format.dart';
 
 /// Imports (Health Connect, Garmin CSV, Hevy CSV) and the list of workouts.
@@ -279,12 +282,18 @@ class _ActivityPanelState extends State<ActivityPanel> {
       _busy = false;
       _status = '';
     });
+    await _reviewAndImportGarmin(r, 'Garmin full export');
+  }
+
+  /// Shows what was read (a preview) and imports it when the user agrees.
+  /// Returns true when the data was imported.
+  Future<bool> _reviewAndImportGarmin(GarminExportResult r, String title) async {
     final ws = r.workouts;
     final dayKeys = r.days.keys.toList()..sort();
     final ok = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Garmin full export'),
+        title: Text(title),
         content: SizedBox(
           width: 440,
           child: SingleChildScrollView(
@@ -329,7 +338,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
         ],
       ),
     );
-    if (ok != true || !mounted) return;
+    if (ok != true || !mounted) return false;
 
     setState(() {
       _busy = true;
@@ -337,13 +346,85 @@ class _ActivityPanelState extends State<ActivityPanel> {
     });
     final c = await importGarminExportInBackground(r.workouts, r.days,
         kcalFixes: r.kcalFixes);
-    if (!mounted) return;
+    if (!mounted) return false;
     setState(() {
       _busy = false;
       _status = 'Workouts: ${c.workouts.added} new, ${c.workouts.updated} updated, '
           '${c.workouts.merged} merged with sessions from another source, '
           '${c.workouts.unchanged} already present. '
           'Days: ${c.daysAdded} new, ${c.daysFilled} updated (Garmin values replace Health Connect ones).';
+    });
+    widget.onChanged();
+    return true;
+  }
+
+  // ---------- Garmin Connect (direct sync) ----------
+
+  /// The sync server fetches the newest data from Garmin Connect; the app
+  /// shows a preview, imports it and then syncs with the server.
+  Future<void> _syncGarminConnect() async {
+    setState(() {
+      _busy = true;
+      _status = 'The server is fetching your Garmin data (this can take a minute)...';
+    });
+    final f = await fetchGarminConnect();
+    if (!mounted) return;
+    final r = f.result;
+    if (r == null) {
+      setState(() {
+        _busy = false;
+        _status = f.error ?? 'The Garmin sync failed.';
+      });
+      return;
+    }
+    setState(() {
+      _busy = false;
+      _status = '';
+    });
+    final imported = await _reviewAndImportGarmin(r, 'Garmin Connect');
+    if (!imported || !mounted || !SyncService.configured) return;
+    setState(() {
+      _busy = true;
+    });
+    final sr = await SyncService.run();
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _status = sr.error == null
+          ? '$_status Synced with the server.'
+          : '$_status Sync with the server: ${sr.error}';
+    });
+  }
+
+  /// One-time cleanup of gym sessions that are listed twice (yours and the
+  /// watch's). New sessions are joined automatically.
+  Future<void> _mergeGymTwins() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Merge double gym sessions'),
+        content: const Text(
+            'Each gym session you logged in the app is joined with the Garmin '
+            'or Health Connect session of the same time. Kcal and heart rate '
+            'are added to your session and the watch entry is removed, so the '
+            'day is listed once. Sessions logged from now on are joined '
+            'automatically.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Merge')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final n = AppDb.instance.mergeGymTwins();
+    setState(() {
+      _status = n == 0
+          ? 'No double gym sessions found.'
+          : 'Joined $n gym session${n == 1 ? '' : 's'} with their watch entry.';
     });
     widget.onChanged();
   }
@@ -359,6 +440,29 @@ class _ActivityPanelState extends State<ActivityPanel> {
           children: [
             Text('Import', style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 8),
+            const Text(
+                'Garmin Connect (direct): your sync server fetches your newest '
+                'activities, laps, sleep and daily numbers from your Garmin '
+                'account. You see a preview before anything is saved.',
+                style: TextStyle(fontSize: 12)),
+            const SizedBox(height: 4),
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              children: [
+                FilledButton.icon(
+                  onPressed: _busy ? null : _syncGarminConnect,
+                  icon: const Icon(Icons.watch),
+                  label: const Text('Sync Garmin Connect'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _busy ? null : _mergeGymTwins,
+                  icon: const Icon(Icons.merge_type),
+                  label: const Text('Merge double gym sessions'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
             if (HealthImport.supported) ...[
               const Text(
                   'Health Connect: your Garmin watch data reaches it through the '

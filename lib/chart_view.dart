@@ -17,6 +17,8 @@ class ChartConfig {
   Compare compare;
   DateTime? compareStart;
   bool showTrend;
+  int trendDays; // window of the trend line: 7, 30 or 90 days
+  int? preset; // days of the range button last pressed (null = custom range)
   bool? line; // null = the metric's default style
   AggMode? agg; // null = the metric's default (weeks and months)
 
@@ -28,6 +30,8 @@ class ChartConfig {
     this.compare = Compare.none,
     this.compareStart,
     this.showTrend = false,
+    this.trendDays = 7,
+    this.preset,
     this.line,
     this.agg,
   });
@@ -40,6 +44,8 @@ class ChartConfig {
         compare: compare,
         compareStart: compareStart,
         showTrend: showTrend,
+        trendDays: trendDays,
+        preset: preset,
         line: line,
         agg: agg,
       );
@@ -123,10 +129,12 @@ double? _aggregate(Map<String, double> daily, _Bk b, bool zeroFill,
   };
 }
 
-double? _trailing(Map<String, double> daily, DateTime day, bool zeroFill, DateTime today) {
+/// Average of the days with a value in the [window] days up to and including [day].
+double? _trailing(Map<String, double> daily, DateTime day, bool zeroFill,
+    DateTime today, int window) {
   var sum = 0.0;
   var n = 0;
-  for (var i = 0; i < 7; i++) {
+  for (var i = 0; i < window; i++) {
     final v = _valueOn(daily, _addDays(day, -i), zeroFill, today);
     if (v != null) {
       sum += v;
@@ -264,7 +272,8 @@ class _MetricChartState extends State<MetricChart> {
         : (len <= 62 ? Bucket.day : (len <= 400 ? Bucket.week : Bucket.month));
     final bk = _buckets(from, to, eff);
 
-    final data = loadDailyData(m, _addDays(from, -6), to); // 6 extra days for the trend
+    // extra days before the range, so the trend line is complete from the first day
+    final data = loadDailyData(m, _addDays(from, -(math.max(7, _c.trendDays) - 1)), to);
     final mode = eff == Bucket.day ? AggMode.avg : (_c.agg ?? m.defaultAgg);
     final suffix = eff == Bucket.day
         ? ''
@@ -284,8 +293,13 @@ class _MetricChartState extends State<MetricChart> {
     ];
 
     List<double?>? trend;
-    if (_c.showTrend && eff == Bucket.day) {
-      trend = [for (final b in bk) _trailing(data.values, b.start, m.zeroFill, today)];
+    // The trend is an average per day, so it only fits bars/lines that show an
+    // average (not totals or highest values). Per bucket it ends on the last day.
+    if (_c.showTrend && mode == AggMode.avg) {
+      trend = [
+        for (final b in bk)
+          _trailing(data.values, _addDays(b.endEx, -1), m.zeroFill, today, _c.trendDays)
+      ];
     }
 
     // comparison period of the same length
@@ -325,7 +339,7 @@ class _MetricChartState extends State<MetricChart> {
         lines.add('${_label(cbk[i], eff)}: ${cv == null ? 'no data' : '${fmt(cv)} ${m.unit}$suffix'}');
       }
       final t = trend == null ? null : trend[i];
-      if (t != null) lines.add('7-day trend: ${fmt(t)} ${m.unit}');
+      if (t != null) lines.add('${_c.trendDays}-day trend: ${fmt(t)} ${m.unit}');
       tips.add(lines.join('\n'));
     }
 
@@ -362,9 +376,28 @@ class _MetricChartState extends State<MetricChart> {
     return DateTime(n.year, n.month, n.day);
   }
 
-  void _setPreset(int days) {
+  /// First day of a range button ("90 d", "5 y", ...). If the metric has no
+  /// data before that day, the range starts at its first day with data.
+  DateTime _presetStart(int days) {
+    final from = _addDays(_today, -(days - 1));
+    final inRange = loadDailyData(_m, from, _today).values;
+    if (inRange.isEmpty) return from;
+    final first = inRange.keys.reduce((a, b) => a.compareTo(b) <= 0 ? a : b);
+    if (first.compareTo(dayKey(from)) <= 0) return from;
+    final before = loadDailyData(_m, DateTime(2015), _addDays(from, -1)).values;
+    if (before.isNotEmpty) return from;
+    final p = DateTime.parse(first);
+    return DateTime(p.year, p.month, p.day);
+  }
+
+  void _applyPreset(int days) {
     _c.to = _today;
-    _c.from = _addDays(_today, -(days - 1));
+    _c.from = _presetStart(days);
+    _c.preset = days;
+  }
+
+  void _setPreset(int days) {
+    _applyPreset(days);
     _changed();
   }
 
@@ -376,6 +409,7 @@ class _MetricChartState extends State<MetricChart> {
     }
     _c.from = _addDays(_c.from, dir * step);
     _c.to = _addDays(_c.to, dir * step);
+    _c.preset = null;
     _changed();
   }
 
@@ -389,6 +423,7 @@ class _MetricChartState extends State<MetricChart> {
     if (r == null) return;
     _c.from = DateTime(r.start.year, r.start.month, r.start.day);
     _c.to = DateTime(r.end.year, r.end.month, r.end.day);
+    _c.preset = null;
     _changed();
   }
 
@@ -484,6 +519,8 @@ class _MetricChartState extends State<MetricChart> {
                   _c.metricId = v;
                   _c.showTrend = _def(v).line;
                   _c.line = null;
+                  // keep the range button, but start at the first data of the new metric
+                  if (_c.preset != null && _c.to == _today) _applyPreset(_c.preset!);
                   _changed();
                 },
               ),
@@ -513,7 +550,8 @@ class _MetricChartState extends State<MetricChart> {
             for (final e in labels.entries)
               ChoiceChip(
                 label: Text(e.value),
-                selected: _c.to == _today && _len == e.key,
+                selected: _c.to == _today &&
+                    (_c.preset == null ? _len == e.key : _c.preset == e.key),
                 onSelected: (_) => _setPreset(e.key),
               ),
             ActionChip(
@@ -576,16 +614,18 @@ class _MetricChartState extends State<MetricChart> {
                     _changed();
                   },
                 ),
-            FilterChip(
-              label: const Text('7-day trend'),
-              selected: _c.showTrend && _eff == Bucket.day,
-              onSelected: _eff == Bucket.day
-                  ? (v) {
-                      _c.showTrend = v;
-                      _changed();
-                    }
-                  : null,
-            ),
+            for (final n in const [7, 30, 90])
+              FilterChip(
+                label: Text('$n-day trend'),
+                selected: _c.showTrend && _c.trendDays == n && _modeEff == AggMode.avg,
+                onSelected: _modeEff == AggMode.avg
+                    ? (v) {
+                        _c.showTrend = v;
+                        if (v) _c.trendDays = n;
+                        _changed();
+                      }
+                    : null,
+              ),
             DropdownButton<Compare>(
               value: _c.compare,
               items: const [
@@ -653,14 +693,14 @@ class _MetricChartState extends State<MetricChart> {
           children: [
             _legendItem(cs.primary, 'Selected period'),
             if (_cmp != null) _legendItem(cs.tertiary, 'Comparison'),
-            if (_trend != null) _legendItem(cs.secondary, '7-day trend'),
+            if (_trend != null) _legendItem(cs.secondary, '${_c.trendDays}-day trend'),
             if (_target != null) _legendItem(cs.error, 'Target'),
           ],
         ),
         const SizedBox(height: 8),
         Text(_statLine('Selected', _sa, m)),
         if (_cmp != null) ...[
-          Text('$_cmpText'),
+          Text(_cmpText),
           Text(_statLine('Comparison', _sb, m)),
           if (_sa != null && _sb != null)
             Text(() {
@@ -736,7 +776,7 @@ class _ChartPainter extends CustomPainter {
       ...values.whereType<double>(),
       if (cmp != null) ...cmp!.whereType<double>(),
       if (trend != null) ...trend!.whereType<double>(),
-      if (target != null) target!,
+      ?target,
     ];
     if (known.isEmpty) {
       _text(canvas, 'No data in this period', left + w / 2, top + h / 2 - 6,

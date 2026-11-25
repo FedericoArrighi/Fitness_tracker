@@ -38,11 +38,16 @@ class FoodsScreen extends StatefulWidget {
 
   /// Start with only your favourites (the star on a food) on show.
   final bool initialFavorites;
+
+  /// In pickMode: the meal the food is for. The foods you log most often in
+  /// this meal are listed first.
+  final String? meal;
   const FoodsScreen({
     super.key,
     this.pickMode = false,
     this.includeRecipes = false,
     this.initialFavorites = false,
+    this.meal,
   });
 
   @override
@@ -61,6 +66,7 @@ class _FoodsScreenState extends State<FoodsScreen> {
   Timer? _debounce;
   bool _onlyFavs = false;
   Set<String> _favs = {};
+  Set<String> _frequentIds = {}; // the first foods of the list, if shown
 
   @override
   void initState() {
@@ -81,6 +87,7 @@ class _FoodsScreenState extends State<FoodsScreen> {
       final db = AppDb.instance;
       _favs = db.favoriteFoodIds();
       List<Food> list;
+      _frequentIds = {};
       if (_onlyFavs) {
         final words = _query
             .trim()
@@ -104,6 +111,13 @@ class _FoodsScreenState extends State<FoodsScreen> {
           final favFoods = db.loadFoodsByIds(_favs, withRecipes);
           final favIds = favFoods.map((f) => f.id).toSet();
           list = [...favFoods, ...list.where((f) => !favIds.contains(f.id))];
+        }
+        final meal = widget.meal;
+        if (widget.pickMode && meal != null && _query.trim().isEmpty) {
+          // what you log most often in this meal comes first
+          final freq = db.loadFrequentFoods(meal, 15, withRecipes);
+          _frequentIds = {for (final f in freq) f.id};
+          list = [...freq, ...list.where((f) => !_frequentIds.contains(f.id))];
         }
       }
       _local = list;
@@ -264,6 +278,35 @@ class _FoodsScreenState extends State<FoodsScreen> {
         '  per 100 g  (${f.values.length}/${nutrients.length} values)';
   }
 
+  Widget _listHeader(String text) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+        child: Text(text, style: Theme.of(context).textTheme.titleSmall),
+      );
+
+  Widget _foodTile(Food f) => ListTile(
+                          leading: f.isRecipe
+                              ? const Icon(Icons.menu_book_outlined)
+                              : null,
+                          title: Text(f.name),
+                          subtitle: Text((f.isRecipe ? 'Recipe - ' : '') +
+                              (f.values['calories'] == null
+                                  ? 'No calorie value'
+                                  : '${fmt(f.values['calories']!)} kcal / 100 g')),
+                          trailing: IconButton(
+                            icon: Icon(_favs.contains(f.id) ? Icons.star : Icons.star_border),
+                            tooltip: _favs.contains(f.id)
+                                ? 'Remove from favourites'
+                                : 'Add to favourites',
+                            onPressed: () {
+                              AppDb.instance.setFavorite(f.id, !_favs.contains(f.id));
+                              _loadLocal();
+                            },
+                          ),
+                          onTap: () => widget.pickMode
+                              ? Navigator.pop(context, f)
+                              : _editLocal(f),
+                        );
+
   @override
   Widget build(BuildContext context) {
     final online = _visibleOnline();
@@ -341,30 +384,13 @@ class _FoodsScreenState extends State<FoodsScreen> {
                             : 'No results.')))
                 : ListView(
                     children: [
-                      for (final f in _local)
-                        ListTile(
-                          leading: f.isRecipe
-                              ? const Icon(Icons.menu_book_outlined)
-                              : null,
-                          title: Text(f.name),
-                          subtitle: Text((f.isRecipe ? 'Recipe - ' : '') +
-                              (f.values['calories'] == null
-                                  ? 'No calorie value'
-                                  : '${fmt(f.values['calories']!)} kcal / 100 g')),
-                          trailing: IconButton(
-                            icon: Icon(_favs.contains(f.id) ? Icons.star : Icons.star_border),
-                            tooltip: _favs.contains(f.id)
-                                ? 'Remove from favourites'
-                                : 'Add to favourites',
-                            onPressed: () {
-                              AppDb.instance.setFavorite(f.id, !_favs.contains(f.id));
-                              _loadLocal();
-                            },
-                          ),
-                          onTap: () => widget.pickMode
-                              ? Navigator.pop(context, f)
-                              : _editLocal(f),
-                        ),
+                      for (var i = 0; i < _local.length; i++) ...[
+                        if (_frequentIds.isNotEmpty && i == 0)
+                          _listHeader('Most often in ${widget.meal}'),
+                        if (_frequentIds.isNotEmpty && i == _frequentIds.length)
+                          _listHeader('Other foods'),
+                        _foodTile(_local[i]),
+                      ],
                       if (online.isNotEmpty)
                         Padding(
                           padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),

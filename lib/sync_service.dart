@@ -33,6 +33,9 @@ class SyncService {
     return u;
   }
 
+  /// The server address cleaned up (http:// added, no trailing slash).
+  static String baseUrl(String raw) => _baseUrl(raw);
+
   static bool get configured {
     final db = AppDb.instance;
     return _baseUrl(db.getSetting('sync_url') ?? '').isNotEmpty &&

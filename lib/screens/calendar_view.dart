@@ -440,9 +440,9 @@ class _DayDetailScreenState extends State<DayDetailScreen> {
         children: [
           _foodCard(key, targets),
           _trainingCard(ws),
-          if (sleep != null) sleep,
-          if (activity != null) activity,
-          if (weight != null) weight,
+          ?sleep,
+          ?activity,
+          ?weight,
         ],
       ),
     );

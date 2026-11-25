@@ -561,6 +561,29 @@ class AppDb {
     ];
   }
 
+  /// The foods you log most often in one meal ('Breakfast', ...), the most
+  /// frequent first.
+  List<Food> loadFrequentFoods(String meal,
+      [int limit = 15, bool includeRecipes = false]) {
+    final sql = 'SELECT f.id, f.name, f.recipe_id FROM foods f JOIN ('
+            'SELECT food_id, COUNT(*) AS n, MAX(updated_at) AS last '
+            'FROM log_entries WHERE deleted = 0 AND meal = ? '
+            'GROUP BY food_id) l ON l.food_id = f.id '
+            'WHERE f.deleted = 0' +
+        (includeRecipes ? '' : ' AND f.recipe_id IS NULL') +
+        ' ORDER BY l.n DESC, l.last DESC LIMIT ?';
+    final rs = _db.select(sql, [meal, limit]);
+    return [
+      for (final r in rs)
+        Food(
+          id: r['id'] as String,
+          name: r['name'] as String,
+          values: _values(r['id'] as String),
+          isRecipe: r['recipe_id'] != null,
+        )
+    ];
+  }
+
   void saveFood(Food f) {
     _db.execute('BEGIN');
     try {
@@ -575,7 +598,7 @@ class AppDb {
       for (final e in f.values.entries) {
         st.execute([f.id, e.key, e.value]);
       }
-      st.dispose();
+      st.close();
       _db.execute('COMMIT');
     } catch (e) {
       _db.execute('ROLLBACK');
@@ -646,7 +669,7 @@ class AppDb {
       for (final e in t.entries) {
         st.execute([e.key, e.value]);
       }
-      st.dispose();
+      st.close();
       _db.execute('COMMIT');
     } catch (e) {
       _db.execute('ROLLBACK');
@@ -784,7 +807,7 @@ class AppDb {
     for (final e in r.per100g().entries) {
       st.execute([r.id, e.key, e.value]);
     }
-    st.dispose();
+    st.close();
   }
 
   void saveRecipe(Recipe r) {
@@ -805,7 +828,7 @@ class AppDb {
       for (var i = 0; i < r.ingredients.length; i++) {
         st.execute([r.id, i, r.ingredients[i].food.id, r.ingredients[i].grams]);
       }
-      st.dispose();
+      st.close();
       _writeShadowFood(r);
       _db.execute('COMMIT');
     } catch (e) {
@@ -1159,7 +1182,9 @@ class AppDb {
     final wc = categoryOf(w.type);
     for (final r in rs) {
       final o = _workoutFromRow(r);
-      if (o.source == 'manual') continue;
+      // Entries you typed in are left alone, except gym sessions: those get
+      // the watch data (kcal, heart rate) of the same session added.
+      if (o.source == 'manual' && categoryOf(o.type) != Cat.strength) continue;
       // Same source is only merged when two different apps wrote the same
       // session into Health Connect (for example Hevy and Garmin Connect).
       final differentApp = o.origin.isNotEmpty &&
@@ -1204,6 +1229,58 @@ class AppDb {
     }
     saveWorkout(merged);
     return 'merged';
+  }
+
+  /// A gym session you just logged may already have a twin from a watch
+  /// (Garmin, Health Connect) that was imported earlier. The twin's numbers
+  /// (kcal, heart rate, ...) are added to your session and the twin is
+  /// removed, so the session is listed once. Returns true if a twin was found.
+  bool absorbWatchTwin(Workout mine) {
+    final rs = _db.select(
+        'SELECT $_wCols FROM workouts WHERE deleted = 0 AND id != ? '
+        'AND start_ms < ? AND end_ms > ?',
+        [mine.id, mine.endMs, mine.startMs]);
+    final cat = categoryOf(mine.type);
+    Workout? best;
+    var bestOverlap = 0;
+    for (final r in rs) {
+      final o = _workoutFromRow(r);
+      if (!(o.source.startsWith('garmin') || o.source == 'health_connect')) continue;
+      if (categoryOf(o.type) != cat) continue;
+      final ov = (o.endMs < mine.endMs ? o.endMs : mine.endMs) -
+          (o.startMs > mine.startMs ? o.startMs : mine.startMs);
+      final shorter = (o.endMs - o.startMs) < (mine.endMs - mine.startMs)
+          ? (o.endMs - o.startMs)
+          : (mine.endMs - mine.startMs);
+      if (shorter > 0 && ov >= shorter * 0.5 && ov > bestOverlap) {
+        best = o;
+        bestOverlap = ov;
+      }
+    }
+    if (best == null) return false;
+    final twin = loadWorkout(best.id) ?? best;
+    saveWorkout(mine.copyWith(
+      distanceM: mine.distanceM == null ? twin.distanceM : null,
+      activeKcal: mine.activeKcal == null ? twin.activeKcal : null,
+      metrics: {...twin.metrics, ...mine.metrics},
+      hr: mine.hr.isNotEmpty ? mine.hr : twin.hr,
+    ));
+    deleteWorkout(twin.id);
+    return true;
+  }
+
+  /// Cleanup for sessions that are already listed twice: joins each gym
+  /// session you logged with its watch twin. Returns how many were joined.
+  int mergeGymTwins() {
+    final rs = _db.select(
+        "SELECT id FROM workouts WHERE deleted = 0 AND source IN ('app', 'manual')");
+    var n = 0;
+    for (final r in rs) {
+      final w = loadWorkout(r['id'] as String);
+      if (w == null || categoryOf(w.type) != Cat.strength) continue;
+      if (absorbWatchTwin(w)) n++;
+    }
+    return n;
   }
 
   void deleteWorkout(String id) {

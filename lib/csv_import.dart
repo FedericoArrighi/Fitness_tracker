@@ -435,10 +435,10 @@ CsvParseResult parseHevyCsv(Uint8List bytes) {
       final rpe = _num(_at(row, iRpe));
       exData[ex]!.add({
         'type': st.isEmpty ? 'normal' : st,
-        if (kg != null) 'kg': kg,
-        if (reps != null) 'reps': reps,
-        if (km != null) 'km': km,
-        if (sec != null) 'sec': sec,
+        'kg': ?kg,
+        'reps': ?reps,
+        'km': ?km,
+        'sec': ?sec,
         if (rpe != null && rpe > 0) 'rpe': rpe,
       });
       if (st == 'warmup') {

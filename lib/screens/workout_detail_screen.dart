@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import '../db.dart';
+import '../exercise_setup.dart';
 import '../fitness.dart';
 import '../nutrients.dart';
 import '../routines.dart';
@@ -22,6 +23,7 @@ String _sourceLabel(String s) => switch (s) {
       'health_connect' => 'Health Connect (from the Garmin Connect app)',
       'garmin_csv' => 'Garmin CSV file',
       'garmin_export' => 'Garmin full data export',
+      'garmin_connect' => 'Garmin Connect (direct sync)',
       'hevy' => 'Hevy',
       'manual' => 'Entered or edited by you',
       'app' => 'Logged in this app',
@@ -433,10 +435,11 @@ class _WorkoutDetailScreenState extends State<WorkoutDetailScreen> {
               icon: const Icon(Icons.playlist_add),
               tooltip: 'Save as routine',
               onPressed: () async {
+                final messenger = ScaffoldMessenger.of(context);
                 final id = await saveRoutineDialog(context,
                     suggestedName: w.title, exercises: w.exercises);
                 if (id != null && mounted) {
-                  ScaffoldMessenger.of(context)
+                  messenger
                       .showSnackBar(const SnackBar(content: Text('Routine saved.')));
                 }
               },
@@ -544,6 +547,7 @@ class _WorkoutDetailScreenState extends State<WorkoutDetailScreen> {
                 'lap), so it is approximate.',
                 style: TextStyle(fontSize: 11)),
           ],
+          ..._workoutNoteCard(w),
           if (w.exercises.isNotEmpty) ...[
             const SizedBox(height: 20),
             Text('Exercises', style: title),
@@ -649,6 +653,41 @@ class _WorkoutDetailScreenState extends State<WorkoutDetailScreen> {
     );
   }
 
+  /// Gym, how it felt, feedback and your note, which the logger stores as
+  /// lines of the workout notes.
+  List<Widget> _workoutNoteCard(Workout w) {
+    const labels = {
+      'Place: ': 'Gym',
+      'Feel: ': 'Felt',
+      'Feedback: ': 'Feedback',
+      'Note: ': 'Note',
+    };
+    final rows = <Widget>[];
+    for (final l in w.notes.split('\n')) {
+      for (final e in labels.entries) {
+        if (l.startsWith(e.key) && l.length > e.key.length) {
+          rows.add(Padding(
+            padding: const EdgeInsets.symmetric(vertical: 2),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                    width: 80,
+                    child: Text(e.value, style: const TextStyle(fontWeight: FontWeight.w600))),
+                Expanded(child: Text(l.substring(e.key.length))),
+              ],
+            ),
+          ));
+        }
+      }
+    }
+    if (rows.isEmpty) return [];
+    return [
+      const SizedBox(height: 16),
+      Card(child: Padding(padding: const EdgeInsets.all(12), child: Column(children: rows))),
+    ];
+  }
+
   Widget _exercise(Map<String, dynamic> ex) {
     final name = (ex['name'] ?? '').toString();
     final sets = ((ex['sets'] as List?) ?? const [])
@@ -716,6 +755,13 @@ class _WorkoutDetailScreenState extends State<WorkoutDetailScreen> {
             if ((ex['note'] ?? '').toString().isNotEmpty)
               Text((ex['note']).toString(),
                   style: const TextStyle(fontSize: 12, fontStyle: FontStyle.italic)),
+            if (ExerciseSetup((ex['mach'] ?? '').toString(), settingsFromJson(ex['cfg']))
+                .summary
+                .isNotEmpty)
+              Text(
+                  ExerciseSetup((ex['mach'] ?? '').toString(), settingsFromJson(ex['cfg']))
+                      .summary,
+                  style: const TextStyle(fontSize: 12)),
             const SizedBox(height: 4),
             ...rows,
             if (best1rm != null)

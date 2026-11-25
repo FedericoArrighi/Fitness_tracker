@@ -395,3 +395,222 @@ double? _activeKj(Map a) {
   if (cal == null || cal <= 0) return null;
   return (bmr != null && bmr > 0 && bmr < cal) ? cal - bmr : cal;
 }
+
+// ---------------------------------------------------------------------------
+// Garmin Connect (direct sync)
+// ---------------------------------------------------------------------------
+
+/// Reads what garmin_sync.py on the sync server fetched from Garmin Connect
+/// (the "inbox"): activities with their laps, and sleep and daily numbers per
+/// day. Sleep and daily numbers go through the same, already checked code as
+/// the full export. Only the activities are read here, because Garmin Connect
+/// sends seconds, metres and kcal where the export has milliseconds,
+/// centimetres and kilojoules.
+GarminExportResult parseGarminInbox(Map inbox) {
+  final warnings = <String>[];
+  final workouts = <Workout>[];
+  final vo2 = <String, double>{};
+  final vo2Run = <String>{};
+  var bad = 0;
+
+  final acts = inbox['activities'];
+  if (acts is List) {
+    for (final a in acts) {
+      if (a is! Map) continue;
+      try {
+        final w = _workoutFromConnect(a);
+        if (w == null) {
+          bad++;
+          continue;
+        }
+        workouts.add(w);
+        final v = _d(a['vO2MaxValue']);
+        if (v != null && v > 0) {
+          final isRun = w.type.contains('RUN');
+          if (!vo2.containsKey(w.day) || (isRun && !vo2Run.contains(w.day))) {
+            vo2[w.day] = v;
+            if (isRun) vo2Run.add(w.day);
+          }
+        }
+      } catch (_) {
+        bad++;
+      }
+    }
+  }
+  if (bad > 0) {
+    warnings.add('$bad activit${bad == 1 ? 'y' : 'ies'} skipped (no time or duration).');
+  }
+
+  // sleep and daily numbers: through the export code (same field names)
+  final sleep = <Map>[];
+  final stats = <Map>[];
+  final d = inbox['days'];
+  if (d is Map) {
+    for (final e in d.values) {
+      if (e is! Map) continue;
+      final s = e['sleep'];
+      if (s is Map) sleep.add(s);
+      final t = e['stats'];
+      if (t is Map) stats.add(t);
+    }
+  }
+  Uint8List bytes(Object o) => Uint8List.fromList(utf8.encode(jsonEncode(o)));
+  final r = parseGarminExport({
+    'sleepData_connect.json': bytes(sleep),
+    'UDSFile_connect.json': bytes(stats),
+  });
+  if (r.error != null) {
+    return GarminExportResult(workouts, const {}, warnings, error: r.error);
+  }
+  final days = <String, Map<String, double>>{
+    for (final e in r.days.entries) e.key: Map<String, double>.from(e.value),
+  };
+  vo2.forEach((day, v) {
+    days.putIfAbsent(day, () => <String, double>{})['vo2max'] = v;
+  });
+  // only the sleep notes of the export code are of interest here
+  for (final msg in r.warnings) {
+    if (msg.contains('night(s)')) warnings.add(msg);
+  }
+  return GarminExportResult(workouts, days, warnings);
+}
+
+/// Start of an activity in milliseconds (UTC) from "2026-11-23 08:25:55"
+/// (GMT) or from the timestamp.
+int? _startOfConnect(Map a) {
+  final gmt = a['startTimeGMT'];
+  if (gmt is String) {
+    final t = DateTime.tryParse('${gmt.trim().replaceFirst(' ', 'T')}Z');
+    if (t != null) return t.millisecondsSinceEpoch;
+  }
+  return _d(a['beginTimestamp'])?.round();
+}
+
+Workout? _workoutFromConnect(Map a) {
+  final id = a['activityId'];
+  final startMs = _startOfConnect(a);
+  final dur = _d(a['duration']) ?? _d(a['elapsedDuration']); // seconds
+  if (id == null || startMs == null || dur == null || dur <= 0) return null;
+  final type = _typeOf(a);
+  if (type.isEmpty) return null;
+
+  // startTimeLocal is the wall-clock time of the place where it happened
+  final loc = a['startTimeLocal'];
+  final day = (loc is String && loc.length >= 10)
+      ? loc.substring(0, 10)
+      : dayKey(DateTime.fromMillisecondsSinceEpoch(startMs));
+
+  final metrics = <String, double>{};
+  void m(String key, double? v) {
+    if (v != null) metrics[key] = v;
+  }
+
+  m('avg_hr', _d(a['averageHR']));
+  m('max_hr', _d(a['maxHR']));
+  m('te_aerobic', _d(a['aerobicTrainingEffect']));
+  final up = _d(a['elevationGain']);
+  final down = _d(a['elevationLoss']);
+  if (up != null && up > 0) m('ascent_m', up);
+  if (down != null && down > 0) m('descent_m', down);
+  m('elev_min', _d(a['minElevation']));
+  m('elev_max', _d(a['maxElevation']));
+  m(
+      'cadence_avg',
+      _d(a['averageRunningCadenceInStepsPerMinute']) ??
+          _d(a['avgDoubleCadence']) ??
+          _d(a['avgRunCadence']));
+  m(
+      'cadence_max',
+      _d(a['maxRunningCadenceInStepsPerMinute']) ??
+          _d(a['maxDoubleCadence']) ??
+          _d(a['maxRunCadence']));
+  final stride = _d(a['avgStrideLength']); // centimetres
+  if (stride != null) m('stride_m', stride > 10 ? stride / 100 : stride);
+  final osc = _d(a['avgVerticalOscillation']); // centimetres
+  if (osc != null) m('vert_osc', osc > 30 ? osc / 10 : osc);
+  m('vert_ratio', _d(a['avgVerticalRatio']));
+  m('gct_ms', _d(a['avgGroundContactTime']));
+  m('power_avg', _d(a['avgPower']));
+  m('power_max', _d(a['maxPower']));
+  m('laps', _d(a['lapCount']));
+  m('reps', _d(a['totalReps']));
+  m('sets', _d(a['activeSets']) ?? _d(a['totalSets']));
+  m('steps', _d(a['steps']));
+  final mov = _d(a['movingDuration']);
+  final ela = _d(a['elapsedDuration']);
+  if (mov != null && mov > 0) m('moving_s', mov);
+  if (ela != null && ela > 0) m('elapsed_s', ela);
+  // drop zeros that only mean "not measured"
+  for (final k in ['ascent_m', 'descent_m', 'cadence_avg', 'cadence_max', 'power_avg', 'power_max', 'steps', 'reps', 'sets', 'laps']) {
+    if (metrics[k] == 0) metrics.remove(k);
+  }
+
+  final dist = _d(a['distance']); // metres
+  final desc = a['description'];
+  return Workout(
+    id: 'garmin:$id',
+    day: day,
+    startMs: startMs,
+    endMs: startMs + (dur * 1000).round(),
+    type: type,
+    title: '${a['activityName'] ?? ''}'.trim(),
+    distanceM: (dist != null && dist > 0) ? dist : null,
+    // calories minus resting energy; Garmin Connect sends kcal already
+    activeKcal: _activeKj(a),
+    source: 'garmin_connect',
+    notes: desc is String ? desc.trim() : '',
+    metrics: metrics,
+    splits: categoryOf(type) == Cat.strength
+        ? const []
+        : _lapsFromConnect(a['laps'], dist, dur),
+  );
+}
+
+/// The laps of a run, ride or swim. They are only used when they add up to
+/// the whole activity (distance and time within 10 percent); otherwise the
+/// laps are left out rather than risk wrong numbers.
+List<Map<String, dynamic>> _lapsFromConnect(dynamic raw, double? totalDist, double totalSecs) {
+  if (raw is! List || raw.length < 2) return const [];
+  final out = <Map<String, dynamic>>[];
+  var sumD = 0.0, sumS = 0.0;
+  var n = 0;
+  for (final l in raw) {
+    if (l is! Map) continue;
+    final secs = _d(l['duration']) ?? _d(l['elapsedDuration']);
+    if (secs == null || secs <= 0) continue;
+    n++;
+    sumS += secs;
+    final item = <String, dynamic>{'i': n, 's': _r2(secs)};
+    void put(String key, double? x, [double lo = 0, double hi = 1e9]) {
+      if (x != null && x > lo && x < hi) item[key] = _r2(x);
+    }
+
+    final dist = _d(l['distance']);
+    if (dist != null && dist > 0) sumD += dist;
+    put('d', dist);
+    put('hr', _d(l['averageHR']), 25, 250);
+    put('hm', _d(l['maxHR']), 25, 250);
+    put(
+        'cd',
+        _d(l['averageRunCadence']) ??
+            _d(l['averageRunningCadenceInStepsPerMinute']) ??
+            _d(l['avgDoubleCadence']),
+        100,
+        260);
+    put('pw', _d(l['averagePower']) ?? _d(l['avgPower']));
+    put('up', _d(l['elevationGain']));
+    put('dn', _d(l['elevationLoss']));
+    put('gc', _d(l['groundContactTime']) ?? _d(l['avgGroundContactTime']), 100, 600);
+    final st = _d(l['strideLength']) ?? _d(l['avgStrideLength']); // centimetres
+    if (st != null) put('st', st > 10 ? st / 100 : st);
+    final vo = _d(l['verticalOscillation']) ?? _d(l['avgVerticalOscillation']); // centimetres
+    if (vo != null) put('vo', vo > 30 ? vo / 10 : vo);
+    out.add(item);
+  }
+  if (out.length < 2) return const [];
+  if (sumS < totalSecs * 0.9 || sumS > totalSecs * 1.1) return const [];
+  if (totalDist != null && totalDist > 0 && (sumD < totalDist * 0.9 || sumD > totalDist * 1.1)) {
+    return const [];
+  }
+  return out;
+}

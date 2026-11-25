@@ -82,6 +82,17 @@ class _TodayScreenState extends State<TodayScreen> {
     _load();
   }
 
+  /// A swipe with the finger: to the left shows the next day, to the right
+  /// the day before.
+  void _onSwipe(DragEndDetails d) {
+    final v = d.primaryVelocity ?? 0;
+    if (v > 300) {
+      _shiftDay(-1);
+    } else if (v < -300) {
+      _shiftDay(1);
+    }
+  }
+
   Future<void> _pickDate() async {
     final d = await showDatePicker(
       context: context,
@@ -165,7 +176,10 @@ class _TodayScreenState extends State<TodayScreen> {
       context,
       MaterialPageRoute(
           builder: (_) => FoodsScreen(
-              pickMode: true, includeRecipes: true, initialFavorites: favorites)),
+              pickMode: true,
+              includeRecipes: true,
+              initialFavorites: favorites,
+              meal: meal)),
     );
     if (food == null || !mounted) return;
     double? grams;
@@ -304,6 +318,60 @@ class _TodayScreenState extends State<TodayScreen> {
       for (final e in items) AppDb.instance.addEntry(day, e.meal, e.foodId, e.grams)
     ];
     _record('Copied ${ids.length} item(s) from ${d.day}.${d.month}.${d.year}',
+        added: ids, notify: true);
+  }
+
+  /// Copies one meal of any day into this meal of the day on show.
+  Future<void> _copyMealFromDay(String meal) async {
+    final d = await showDatePicker(
+      context: context,
+      helpText: 'Copy a meal from which day?',
+      initialDate: DateTime(_date.year, _date.month, _date.day - 1),
+      firstDate: DateTime(2020),
+      lastDate: DateTime(2100),
+    );
+    if (d == null || !mounted) return;
+    final label = '${d.day}.${d.month}.${d.year}';
+    final items = AppDb.instance.loadDay(dayKey(d));
+    final present = [
+      for (final m in meals)
+        if (items.any((e) => e.meal == m)) m
+    ];
+    if (present.isEmpty) {
+      _snack('Nothing was logged on $label.');
+      return;
+    }
+    final String from;
+    if (present.length == 1) {
+      from = present.first;
+    } else {
+      // the same meal of that day comes first
+      final ordered = [
+        if (present.contains(meal)) meal,
+        ...present.where((m) => m != meal),
+      ];
+      final pick = await showDialog<String>(
+        context: context,
+        builder: (context) => SimpleDialog(
+          title: Text('Which meal of $label?'),
+          children: [
+            for (final m in ordered)
+              SimpleDialogOption(
+                onPressed: () => Navigator.pop(context, m),
+                child: Text('$m (${items.where((e) => e.meal == m).length} items)'),
+              ),
+          ],
+        ),
+      );
+      if (pick == null || !mounted) return;
+      from = pick;
+    }
+    final day = dayKey(_date);
+    final ids = [
+      for (final e in items)
+        if (e.meal == from) AppDb.instance.addEntry(day, meal, e.foodId, e.grams)
+    ];
+    _record('Copied ${ids.length} item(s) of $from from $label into $meal',
         added: ids, notify: true);
   }
 
@@ -529,6 +597,7 @@ class _TodayScreenState extends State<TodayScreen> {
                     if (v == 'copy') _copyMeal(meal);
                     if (v == 'cut') _cutMeal(meal);
                     if (v == 'paste') _pasteInto(meal);
+                    if (v == 'copyfrom') _copyMealFromDay(meal);
                     if (v == 'savetpl') _saveMealTemplate(meal);
                     if (v == 'addtpl') _addTemplateTo(meal);
                   },
@@ -547,6 +616,9 @@ class _TodayScreenState extends State<TodayScreen> {
                         child: Text(_clip.isEmpty
                             ? 'Paste'
                             : 'Paste $_clipLabel (${_clip.length} items)')),
+                    const PopupMenuItem(
+                        value: 'copyfrom',
+                        child: Text('Copy a meal from another day...')),
                     PopupMenuItem(
                         value: 'savetpl',
                         enabled: es.isNotEmpty,
@@ -611,6 +683,8 @@ class _TodayScreenState extends State<TodayScreen> {
         const SingleActivator(LogicalKeyboardKey.keyY, control: true): _redo,
         const SingleActivator(LogicalKeyboardKey.keyZ, control: true, shift: true): _redo,
         const SingleActivator(LogicalKeyboardKey.delete): _clearSelected,
+        const SingleActivator(LogicalKeyboardKey.arrowLeft): () => _shiftDay(-1),
+        const SingleActivator(LogicalKeyboardKey.arrowRight): () => _shiftDay(1),
         const SingleActivator(LogicalKeyboardKey.escape): () =>
             setState(() => _selected = null),
       },
@@ -673,7 +747,10 @@ class _TodayScreenState extends State<TodayScreen> {
               ),
             ],
           ),
-          body: ListView(
+          body: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onHorizontalDragEnd: _isDesktop ? null : _onSwipe,
+            child: ListView(
             padding: const EdgeInsets.all(12),
             children: [
               if (_isDesktop)
@@ -742,6 +819,7 @@ class _TodayScreenState extends State<TodayScreen> {
               ),
               for (final m in meals) _mealSection(m),
             ],
+          ),
           ),
         ),
       ),

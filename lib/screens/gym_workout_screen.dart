@@ -4,10 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../analysis.dart';
 import '../db.dart';
+import '../exercise_setup.dart';
 import '../gym_data.dart';
 import '../nutrients.dart';
 import '../routines.dart';
 import '../workout_types.dart';
+import 'exercise_picker.dart';
 import 'lift_tools_screen.dart';
 
 class _GSet {
@@ -37,6 +39,8 @@ class _GEx {
   final List<_GSet> sets;
   String? ss; // exercises with the same value are a superset
   String note = '';
+  String machine = ''; // brand and model of the machine
+  List<List<String>> cfg = []; // [setting, value] pairs: seat height, pin, ...
   final Key key = UniqueKey(); // lets the list keep track of it while reordering
   _GEx(this.name, this.sets);
 }
@@ -130,6 +134,9 @@ class GymWorkoutScreen extends StatefulWidget {
 class _GymWorkoutScreenState extends State<GymWorkoutScreen> {
   final _title = TextEditingController();
   final _notes = TextEditingController();
+  final _place = TextEditingController(); // gym: name, city
+  int? _feel; // how the workout felt, 1 to 5
+  String _feedback = ''; // a few words about the workout, written at the end
   final List<_GEx> _ex = [];
   final List<_GSet> _graveyard = []; // removed sets, disposed at the end
   late DateTime _start;
@@ -167,6 +174,11 @@ class _GymWorkoutScreenState extends State<GymWorkoutScreen> {
       _title.text = w.title;
       final noteLine = w.notes.split('\n').where((l) => l.startsWith('Note: ')).toList();
       if (noteLine.isNotEmpty) _notes.text = noteLine.first.substring(6);
+      for (final l in w.notes.split('\n')) {
+        if (l.startsWith('Place: ')) _place.text = l.substring(7);
+        if (l.startsWith('Feel: ')) _feel = int.tryParse(l.substring(6).split('/').first.trim());
+        if (l.startsWith('Feedback: ')) _feedback = l.substring(10);
+      }
       for (final ex in w.exercises) {
         _ex.add(_fromMap(ex, done: true));
       }
@@ -175,11 +187,13 @@ class _GymWorkoutScreenState extends State<GymWorkoutScreen> {
       if (widget.resume) restored = _restoreDraft();
       if (!restored) {
         _start = DateTime.now();
+        final places = _recentPlaces();
+        if (places.isNotEmpty) _place.text = places.first;
         final t = widget.template;
         if (t != null) {
           _title.text = t.title;
           for (final ex in t.exercises) {
-            _ex.add(_fromMap(ex, done: false));
+            _ex.add(_fromMap(ex, done: false, prefill: true));
           }
         }
       }
@@ -198,6 +212,7 @@ class _GymWorkoutScreenState extends State<GymWorkoutScreen> {
     _saveTimer?.cancel();
     _title.dispose();
     _notes.dispose();
+    _place.dispose();
     for (final e in _ex) {
       for (final s in e.sets) {
         s.dispose();
@@ -222,7 +237,7 @@ class _GymWorkoutScreenState extends State<GymWorkoutScreen> {
     }
   }
 
-  _GEx _fromMap(Map<String, dynamic> ex, {required bool done}) {
+  _GEx _fromMap(Map<String, dynamic> ex, {required bool done, bool prefill = false}) {
     final sets = <_GSet>[];
     for (final s in ((ex['sets'] as List?) ?? const [])) {
       final m = (s as Map).cast<String, dynamic>();
@@ -238,9 +253,37 @@ class _GymWorkoutScreenState extends State<GymWorkoutScreen> {
       ));
     }
     if (sets.isEmpty) sets.add(_GSet());
-    return _GEx((ex['name'] ?? '').toString(), sets)
+    final g = _GEx((ex['name'] ?? '').toString(), sets)
       ..ss = ex['ss']?.toString()
       ..note = (ex['note'] ?? '').toString();
+    g.machine = (ex['mach'] ?? '').toString();
+    g.cfg = settingsFromJson(ex['cfg']);
+    if (prefill && g.machine.isEmpty && g.cfg.isEmpty) {
+      // a routine or an earlier workout: use what you saved for this exercise
+      final saved = loadExerciseSetup(g.name);
+      g.machine = saved.machine;
+      g.cfg = saved.settings;
+    }
+    return g;
+  }
+
+  // ---------- gym places ----------
+
+  List<String> _recentPlaces() {
+    try {
+      final l = jsonDecode(AppDb.instance.getSetting('gym_places') ?? '[]') as List;
+      return [for (final x in l) x.toString()];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  void _rememberPlace(String p) {
+    final t = p.trim();
+    if (t.isEmpty) return;
+    final l = _recentPlaces()..removeWhere((x) => x.toLowerCase() == t.toLowerCase());
+    l.insert(0, t);
+    AppDb.instance.setSetting('gym_places', jsonEncode(l.take(12).toList()));
   }
 
   // ---------- the draft (survives closing the app) ----------
@@ -249,12 +292,17 @@ class _GymWorkoutScreenState extends State<GymWorkoutScreen> {
         'start': _start.millisecondsSinceEpoch,
         'title': _title.text,
         'notes': _notes.text,
+        'place': _place.text,
+        'feel': _feel,
+        'feedback': _feedback,
         'ex': [
           for (final e in _ex)
             {
               'name': e.name,
               'ss': e.ss,
               'note': e.note,
+              'mach': e.machine,
+              'cfg': settingsToJson(e.cfg),
               'sets': [
                 for (final s in e.sets)
                   {'t': s.type, 'kg': s.kg.text, 'reps': s.reps.text, 'rpe': s.rpe.text, 'done': s.done}
@@ -277,6 +325,9 @@ class _GymWorkoutScreenState extends State<GymWorkoutScreen> {
       _start = DateTime.fromMillisecondsSinceEpoch((d['start'] as num).toInt());
       _title.text = (d['title'] ?? '').toString();
       _notes.text = (d['notes'] ?? '').toString();
+      _place.text = (d['place'] ?? '').toString();
+      _feel = (d['feel'] as num?)?.toInt();
+      _feedback = (d['feedback'] ?? '').toString();
       for (final e in (d['ex'] as List)) {
         final m = (e as Map).cast<String, dynamic>();
         final sets = <_GSet>[
@@ -291,7 +342,9 @@ class _GymWorkoutScreenState extends State<GymWorkoutScreen> {
         ];
         _ex.add(_GEx((m['name'] ?? '').toString(), sets.isEmpty ? [_GSet()] : sets)
           ..ss = m['ss']?.toString()
-          ..note = (m['note'] ?? '').toString());
+          ..note = (m['note'] ?? '').toString()
+          ..machine = (m['mach'] ?? '').toString()
+          ..cfg = settingsFromJson(m['cfg']));
       }
       return true;
     } catch (_) {
@@ -443,14 +496,95 @@ class _GymWorkoutScreenState extends State<GymWorkoutScreen> {
   }
 
   Future<void> _addExercise() async {
-    final name = await showModalBottomSheet<String>(
-      context: context,
-      isScrollControlled: true,
-      builder: (context) => _ExercisePicker(history: _history),
-    );
+    final name = await pickExercise(context, _history);
     if (name == null || name.trim().isEmpty) return;
-    setState(() => _ex.add(_GEx(name.trim(), [_GSet()])));
+    final g = _GEx(name.trim(), [_GSet()]);
+    final saved = loadExerciseSetup(g.name);
+    g.machine = saved.machine;
+    g.cfg = saved.settings;
+    setState(() => _ex.add(g));
     _scheduleSave();
+  }
+
+  /// Machine and settings of one exercise (also remembered for next time).
+  Future<void> _editSetup(_GEx e) async {
+    final r = await editExerciseSetupDialog(context, e.name,
+        current: ExerciseSetup(e.machine, e.cfg));
+    if (r == null || !mounted) return;
+    setState(() {
+      e.machine = r.machine;
+      e.cfg = r.settings;
+    });
+    _scheduleSave();
+  }
+
+  /// At the end: the gym, how it felt and a few words about the workout.
+  /// Returns true to save the workout.
+  Future<bool> _finishDialog() async {
+    final fb = TextEditingController(text: _feedback);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setS) => AlertDialog(
+          title: Text(_editing ? 'Save the workout' : 'Finish the workout'),
+          content: SizedBox(
+            width: 420,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  TextField(
+                    controller: _place,
+                    decoration: const InputDecoration(
+                      labelText: 'Gym (name, city)',
+                      prefixIcon: Icon(Icons.place_outlined),
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  const Text('How did it feel?'),
+                  Wrap(
+                    spacing: 6,
+                    children: [
+                      for (var n = 1; n <= 5; n++)
+                        ChoiceChip(
+                          label: Text('$n'),
+                          selected: _feel == n,
+                          onSelected: (v) => setS(() => _feel = v ? n : null),
+                        ),
+                    ],
+                  ),
+                  const Text('1 = hard day, 5 = great', style: TextStyle(fontSize: 11)),
+                  const SizedBox(height: 14),
+                  TextField(
+                    controller: fb,
+                    minLines: 2,
+                    maxLines: 5,
+                    decoration: const InputDecoration(
+                      labelText: 'Feedback on the workout',
+                      hintText: 'Energy, pain, what to change next time...',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Back')),
+            TextButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: Text(_editing ? 'Save' : 'Finish')),
+          ],
+        ),
+      ),
+    );
+    _feedback = fb.text.trim().replaceAll('\n', ' / ');
+    Future.delayed(const Duration(seconds: 1), fb.dispose);
+    return ok == true;
   }
 
   Future<void> _discard() async {
@@ -529,6 +663,8 @@ class _GymWorkoutScreenState extends State<GymWorkoutScreen> {
           'sets': sets,
           if (e.ss != null) 'ss': e.ss,
           if (e.note.trim().isNotEmpty) 'note': e.note.trim(),
+          if (e.machine.trim().isNotEmpty) 'mach': e.machine.trim(),
+          if (e.cfg.isNotEmpty) 'cfg': settingsToJson(e.cfg),
         });
       }
     }
@@ -536,13 +672,22 @@ class _GymWorkoutScreenState extends State<GymWorkoutScreen> {
       _snack('Tick the sets you completed first.');
       return;
     }
+    if (!await _finishDialog() || !mounted) return;
     var end = _editing
         ? DateTime.fromMillisecondsSinceEpoch(widget.editing!.endMs)
         : DateTime.now();
     if (!end.isAfter(_start)) end = _start.add(const Duration(minutes: 1));
     final metrics = strengthMetrics(exs);
     final userNote = _notes.text.trim();
-    final notes = [strengthNotes(exs), if (userNote.isNotEmpty) 'Note: $userNote'].join('\n');
+    final place = _place.text.trim().replaceAll('\n', ' ');
+    _rememberPlace(place);
+    final notes = [
+      strengthNotes(exs),
+      if (place.isNotEmpty) 'Place: $place',
+      if (_feel != null) 'Feel: $_feel/5',
+      if (_feedback.isNotEmpty) 'Feedback: $_feedback',
+      if (userNote.isNotEmpty) 'Note: $userNote',
+    ].join('\n');
     final title = _title.text.trim().isEmpty ? 'Gym workout' : _title.text.trim();
     final prs = _records(exs);
 
@@ -567,6 +712,8 @@ class _GymWorkoutScreenState extends State<GymWorkoutScreen> {
             exercises: exs,
           );
     AppDb.instance.saveWorkout(w);
+    // a watch session of the same time (Garmin) imported earlier joins this one
+    if (!_editing) AppDb.instance.absorbWatchTwin(w);
     _finished = true;
     _timer?.cancel();
     _saveTimer?.cancel();
@@ -632,7 +779,6 @@ class _GymWorkoutScreenState extends State<GymWorkoutScreen> {
 
   /// Dragging an exercise to a new place.
   void _reorder(int oldIndex, int newIndex) {
-    if (newIndex > oldIndex) newIndex--;
     if (newIndex == oldIndex) return;
     setState(() {
       final e = _ex.removeAt(oldIndex);
@@ -918,6 +1064,31 @@ class _GymWorkoutScreenState extends State<GymWorkoutScreen> {
     );
   }
 
+  /// The machine and settings of an exercise in one line; tap to change.
+  Widget _setupLine(_GEx e) {
+    final summary = ExerciseSetup(e.machine, e.cfg).summary;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: InkWell(
+        onTap: () => _editSetup(e),
+        child: Row(
+          children: [
+            const Icon(Icons.tune, size: 16),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                summary.isEmpty ? 'Machine and settings' : summary,
+                style: TextStyle(
+                    fontSize: 12,
+                    color: summary.isEmpty ? Theme.of(context).hintColor : null),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _exerciseCard(int i) {
     final e = _ex[i];
     const head = TextStyle(fontSize: 11, fontWeight: FontWeight.w600);
@@ -963,6 +1134,7 @@ class _GymWorkoutScreenState extends State<GymWorkoutScreen> {
                     if (v == 'warmups') _addWarmups(e);
                     if (v == 'drop') _addDropSet(e);
                     if (v == 'note') _editNote(e);
+                    if (v == 'setup') _editSetup(e);
                     if (v == 'remove') {
                       setState(() {
                         _graveyard.addAll(_ex.removeAt(i).sets);
@@ -985,6 +1157,8 @@ class _GymWorkoutScreenState extends State<GymWorkoutScreen> {
                     if (e.ss != null)
                       const PopupMenuItem(
                           value: 'unsuperset', child: Text('Remove from the superset')),
+                    const PopupMenuItem(
+                        value: 'setup', child: Text('Machine and settings...')),
                     PopupMenuItem(
                         value: 'note',
                         child: Text(e.note.isEmpty ? 'Add a note' : 'Edit the note')),
@@ -1006,6 +1180,7 @@ class _GymWorkoutScreenState extends State<GymWorkoutScreen> {
                       color: Theme.of(context).colorScheme.primary),
                 ),
               ),
+            _setupLine(e),
             if (e.note.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(bottom: 4),
@@ -1092,6 +1267,36 @@ class _GymWorkoutScreenState extends State<GymWorkoutScreen> {
             onChanged: (_) => _scheduleSave(),
           ),
           const SizedBox(height: 8),
+          TextField(
+            controller: _place,
+            decoration: InputDecoration(
+              labelText: 'Gym (name, city)',
+              prefixIcon: const Icon(Icons.place_outlined),
+              border: const OutlineInputBorder(),
+              suffixIcon: PopupMenuButton<String>(
+                icon: const Icon(Icons.arrow_drop_down),
+                tooltip: 'Your gyms',
+                onSelected: (v) {
+                  setState(() => _place.text = v);
+                  _scheduleSave();
+                },
+                itemBuilder: (_) {
+                  final places = _recentPlaces();
+                  if (places.isEmpty) {
+                    return const [
+                      PopupMenuItem<String>(
+                          enabled: false, value: '', child: Text('No gyms saved yet')),
+                    ];
+                  }
+                  return [
+                    for (final p in places) PopupMenuItem<String>(value: p, child: Text(p)),
+                  ];
+                },
+              ),
+            ),
+            onChanged: (_) => _scheduleSave(),
+          ),
+          const SizedBox(height: 8),
           if (!_editing)
             ValueListenableBuilder<int>(
               valueListenable: _rest,
@@ -1126,7 +1331,7 @@ class _GymWorkoutScreenState extends State<GymWorkoutScreen> {
             shrinkWrap: true,
             physics: const NeverScrollableScrollPhysics(),
             buildDefaultDragHandles: false,
-            onReorder: _reorder,
+            onReorderItem: _reorder,
             children: [
               for (var i = 0; i < _ex.length; i++)
                 KeyedSubtree(key: _ex[i].key, child: _exerciseCard(i)),
@@ -1174,87 +1379,6 @@ class _GymWorkoutScreenState extends State<GymWorkoutScreen> {
             ),
           const SizedBox(height: 80),
         ],
-      ),
-    );
-  }
-}
-
-/// Bottom sheet with a search box: your own exercises first, then common ones.
-class _ExercisePicker extends StatefulWidget {
-  final Map<String, List<LiftSession>> history;
-  const _ExercisePicker({required this.history});
-
-  @override
-  State<_ExercisePicker> createState() => _ExercisePickerState();
-}
-
-class _ExercisePickerState extends State<_ExercisePicker> {
-  String _q = '';
-  late final List<String> _names;
-
-  @override
-  void initState() {
-    super.initState();
-    final lists = widget.history.values.where((l) => l.isNotEmpty).toList()
-      ..sort((a, b) => b.length.compareTo(a.length));
-    final names = [for (final l in lists) l.first.name];
-    final lower = names.map((n) => n.toLowerCase()).toSet();
-    for (final b in builtinExercises) {
-      if (!lower.contains(b.toLowerCase())) names.add(b);
-    }
-    _names = names;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final q = _q.trim().toLowerCase();
-    final words = q.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
-    final shown = [
-      for (final n in _names)
-        if (words.every((w) => n.toLowerCase().contains(w))) n
-    ];
-    final exact = _names.any((n) => n.toLowerCase() == q);
-    return Padding(
-      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
-      child: SizedBox(
-        height: MediaQuery.of(context).size.height * 0.75,
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: TextField(
-                autofocus: true,
-                decoration: const InputDecoration(
-                  prefixIcon: Icon(Icons.search),
-                  hintText: 'Search or type a new exercise',
-                  border: OutlineInputBorder(),
-                ),
-                onChanged: (v) => setState(() => _q = v),
-                onSubmitted: (v) {
-                  if (shown.isNotEmpty) {
-                    Navigator.pop(context, shown.first);
-                  } else if (v.trim().isNotEmpty) {
-                    Navigator.pop(context, v.trim());
-                  }
-                },
-              ),
-            ),
-            Expanded(
-              child: ListView(
-                children: [
-                  if (q.isNotEmpty && !exact)
-                    ListTile(
-                      leading: const Icon(Icons.add_circle_outline),
-                      title: Text('Create "${_q.trim()}"'),
-                      onTap: () => Navigator.pop(context, _q.trim()),
-                    ),
-                  for (final n in shown.take(80))
-                    ListTile(title: Text(n), onTap: () => Navigator.pop(context, n)),
-                ],
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }

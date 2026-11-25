@@ -16,7 +16,10 @@ import argparse
 import json
 import os
 import secrets
+import shutil
 import sqlite3
+import subprocess
+import sys
 import threading
 from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,6 +39,17 @@ ALLOWED_TABLES = {
 }
 MAX_BODY = 200 * 1024 * 1024
 LOCK = threading.Lock()
+
+# Garmin Connect sync (optional): the app asks this server to run
+# garmin_sync.py (with the Python of its own environment), which writes
+# garmin_inbox.json; the app then downloads that file.
+INBOX_PATH = os.path.join(HERE, "garmin_inbox.json")
+GARMIN_SCRIPT = os.path.join(HERE, "garmin_sync.py")
+GARMIN_LOCK = threading.Lock()
+GARMIN_PYTHON = os.path.join(
+    HERE, "garmin_env", "Scripts" if os.name == "nt" else "bin",
+    "python.exe" if os.name == "nt" else "python",
+)
 
 
 def init_db():
@@ -173,10 +187,51 @@ class Handler(BaseHTTPRequestHandler):
                     {"ok": True, "seq": current_seq(db),
                      "tables": sorted(ALLOWED_TABLES)},
                 )
+        elif self.path == "/garmin/inbox":
+            if not self._authorized():
+                self._send(401, {"error": "wrong token"})
+                return
+            try:
+                with open(INBOX_PATH, encoding="utf-8") as f:
+                    inbox = json.load(f)
+            except (OSError, ValueError):
+                inbox = {"activities": [], "days": {}}
+            self._send(200, inbox)
         else:
             self._send(404, {"error": "not found"})
 
+    def _garmin_run(self):
+        """Runs garmin_sync.py once and reports how it went."""
+        if not os.path.exists(GARMIN_SCRIPT):
+            return {"ok": False, "output": "garmin_sync.py is missing in the server folder."}
+        if not (os.path.exists(GARMIN_PYTHON) or shutil.which(GARMIN_PYTHON)):
+            return {"ok": False, "output": (
+                "The Garmin Python environment was not found: %s\n"
+                "Create it as described (py -3.13 -m venv garmin_env ...)." % GARMIN_PYTHON)}
+        if not GARMIN_LOCK.acquire(blocking=False):
+            return {"ok": False, "output": "A Garmin fetch is already running."}
+        try:
+            res = subprocess.run(
+                [GARMIN_PYTHON, GARMIN_SCRIPT],
+                cwd=HERE, capture_output=True, timeout=240,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            text = (res.stdout + res.stderr).decode("utf-8", errors="replace")
+            return {"ok": res.returncode == 0, "output": text[-1500:].strip()}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "output": "The Garmin fetch took longer than 4 minutes."}
+        except OSError as e:
+            return {"ok": False, "output": "Could not start the Garmin fetch: %s" % e}
+        finally:
+            GARMIN_LOCK.release()
+
     def do_POST(self):
+        if self.path == "/garmin/run":
+            if not self._authorized():
+                self._send(401, {"error": "wrong token"})
+                return
+            self._send(200, self._garmin_run())
+            return
         if self.path != "/sync":
             self._send(404, {"error": "not found"})
             return
@@ -204,7 +259,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--garmin-python", default=None,
+                    help="python.exe of the Garmin environment (default: garmin_env next to this file)")
     args = ap.parse_args()
+    if args.garmin_python:
+        global GARMIN_PYTHON
+        GARMIN_PYTHON = args.garmin_python
     init_db()
     TOKEN = load_token()
     print("Macro Tracker sync server")

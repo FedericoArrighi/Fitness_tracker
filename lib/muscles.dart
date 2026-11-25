@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'db.dart';
+import 'exercise_library.dart';
 
 /// The muscle groups used for the weekly volume.
 const muscleGroups = [
@@ -125,6 +126,7 @@ const _settingKey = 'muscle_map';
 
 /// What you changed by hand, by lower-case exercise name.
 Map<String, MuscleProfile> loadMuscleOverrides() {
+  reloadCustomExercises(); // your own exercises can have changed (sync)
   try {
     final m = jsonDecode(AppDb.instance.getSetting(_settingKey) ?? '{}') as Map;
     return {
@@ -141,8 +143,15 @@ void saveMuscleOverrides(Map<String, MuscleProfile> o) {
       _settingKey, jsonEncode({for (final e in o.entries) e.key: e.value.toJson()}));
 }
 
-MuscleProfile muscleProfileOf(String name, Map<String, MuscleProfile> overrides) =>
-    overrides[name.trim().toLowerCase()] ?? detectMuscles(name);
+/// Order: what you set by hand for this exercise, then the exercise library
+/// (your own exercises first), then a guess from the name.
+MuscleProfile muscleProfileOf(String name, Map<String, MuscleProfile> overrides) {
+  final mine = overrides[name.trim().toLowerCase()];
+  if (mine != null) return mine;
+  final lib = findExercise(name);
+  if (lib != null && !lib.muscles.isEmpty) return lib.muscles;
+  return detectMuscles(name);
+}
 
 /// Hard sets per muscle between two days (YYYY-MM-DD, both included), and
 /// which exercises added to each muscle.

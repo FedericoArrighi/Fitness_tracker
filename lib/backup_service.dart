@@ -58,7 +58,7 @@ class BackupService {
           File(src).copySync(target);
         }
       } finally {
-        db.dispose();
+        db.close();
       }
     });
     return target;
@@ -126,7 +126,7 @@ class BackupService {
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('foods', 'workouts')");
         return r.length == 2;
       } finally {
-        db.dispose();
+        db.close();
       }
     } catch (_) {
       return false;
