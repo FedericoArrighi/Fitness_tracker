@@ -1,0 +1,67 @@
+{
+ "activityId": 25177045945,
+ "lapDTOs": [
+  {
+   "startTimeGMT": "2026-11-23T18:39:52.0",
+   "duration": 4561.196,
+   "movingDuration": 0.0,
+   "elapsedDuration": 4562.815,
+   "calories": 265.0,
+   "bmrCalories": 110.0,
+   "averageHR": 83.0,
+   "maxHR": 132.0,
+   "lapIndex": 1,
+   "lengthDTOs": [],
+   "connectIQMeasurement": [],
+   "intensityType": "ACTIVE",
+   "messageIndex": 0
+  }
+ ],
+ "eventDTOs": [
+  {
+   "startTimeGMT": "2026-11-23T18:39:51.0",
+   "startTimeGMTDoubleValue": 1795459191000.0,
+   "sectionTypeDTO": {
+    "id": 4,
+    "key": "timerTrigger",
+    "sectionTypeKey": "TIMER_TRIGGER"
+   }
+  },
+  {
+   "startTimeGMT": "2026-11-23T18:39:52.0",
+   "startTimeGMTDoubleValue": 1795459192000.0,
+   "sectionTypeDTO": {
+    "id": 4,
+    "key": "timerTrigger",
+    "sectionTypeKey": "TIMER_TRIGGER"
+   }
+  },
+  {
+   "startTimeGMT": "2026-11-23T18:41:29.0",
+   "startTimeGMTDoubleValue": 1795459289000.0,
+   "sectionTypeDTO": {
+    "id": 4,
+    "key": "timerTrigger",
+    "sectionTypeKey": "TIMER_TRIGGER"
+   }
+  },
+  {
+   "startTimeGMT": "2026-11-23T18:41:30.0",
+   "startTimeGMTDoubleValue": 1795459290000.0,
+   "sectionTypeDTO": {
+    "id": 4,
+    "key": "timerTrigger",
+    "sectionTypeKey": "TIMER_TRIGGER"
+   }
+  },
+  {
+   "startTimeGMT": "2026-11-23T19:55:55.0",
+   "startTimeGMTDoubleValue": 1795463755000.0,
+   "sectionTypeDTO": {
+    "id": 4,
+    "key": "timerTrigger",
+    "sectionTypeKey": "TIMER_TRIGGER"
+   }
+  }
+ ]
+}
